@@ -1,0 +1,11 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+GOOGLE_SHEETS_CREDENTIALS = os.getenv("GOOGLE_SHEETS_CREDENTIALS")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+BLUESKY_API_KEY = os.getenv("BLUESKY_API_KEY")
+TWITTER_USERNAME = os.getenv("TWITTER_USERNAME")
+TWITTER_PASSWORD = os.getenv("TWITTER_PASSWORD") 
