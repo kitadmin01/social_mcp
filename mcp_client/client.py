@@ -32,7 +32,7 @@ def main():
                 
                 # Run the workflow
                 result = await graph.ainvoke({})
-                print("Workflow completed with result:", result)
+                print("Workflow completed with result:")
 
     asyncio.run(run_workflow())
 

@@ -69,23 +69,18 @@ class WorkflowGraph:
             logger.warning(f"URL parsing error for {url}: {str(e)}")
             return False
 
-    def batch_retrieval(self, state):
+    async def batch_retrieval(self, state):
         try:
-            logger.info("Retrieving pending URLs from Google Sheet")
             rows = self.sheets.get_pending_urls()[:self.M]
-            logger.info(f"Found {len(rows)} pending rows")
             
             valid_rows = []
             for row in rows:
                 url = row.get('url', '')
-                logger.info(f"Processing row {row.get('id')} with URL: {url}")
                 
                 if self.is_valid_url(url):
-                    logger.info(f"Valid URL found: {url}")
                     self.sheets.update_row(row['id'], {"status": "in_progress", "processing_ts": self.now()})
                     valid_rows.append(row)
                 else:
-                    logger.warning(f"Invalid URL in row {row.get('id')}: {url}")
                     self.sheets.update_row(row['id'], {
                         "status": "error",
                         "processing_ts": self.now(),
@@ -93,21 +88,17 @@ class WorkflowGraph:
                         "content_ts": self.now()
                     })
             
-            logger.info(f"Returning {len(valid_rows)} valid rows for processing")
             return {"rows": valid_rows, "current_row": None, "text": None, "tweets": None}
         except Exception as e:
-            logger.error(f"Error in batch_retrieval: {str(e)}")
             return {"error": str(e)}
 
     async def extract_content_node(self, state):
         if not state.get('rows'):
-            logger.info("No rows to process")
             return state
             
         # Get the first row to process
         row = state['rows'][0]
         url = row.get('url', '')
-        logger.info(f"Extracting content from URL: {url}")
         
         async def try_extract():
             if not self.is_valid_url(url):
@@ -130,7 +121,6 @@ class WorkflowGraph:
                 "rows": state['rows'][1:]  # Remove the processed row
             }
         except Exception as e:
-            logger.error(f"Error extracting content from {url}: {str(e)}")
             # Safely handle retry count
             retry_count = row.get('retry_count_content', '0')
             try:
@@ -152,18 +142,14 @@ class WorkflowGraph:
 
     async def generate_tweets_node(self, state):
         if state.get('error'):
-            logger.error(f"Error in state: {state['error']}")
             return state
             
         if not state.get('text'):
             error_msg = "No text content available for tweet generation"
-            logger.error(error_msg)
             return {**state, "error": error_msg}
             
         text = state["text"]
         current_row = state["current_row"]
-        
-        logger.info(f"Generating tweets for text: {text[:100]}...")
         
         prompt = f"""Generate 6 engaging tweets about the following content. Each tweet should be unique and include relevant hashtags.
 
@@ -188,9 +174,7 @@ Return the tweets as a JSON array. Example format:
 Do not include any numbering or additional text. Return only the JSON array."""
         
         try:
-            logger.info("Calling LLM to generate tweets...")
             response = await self.llm.generate_content(prompt)
-            logger.info(f"LLM response: {response}")
             
             # Parse the response into a list of tweet objects
             tweets = []
@@ -227,39 +211,31 @@ Do not include any numbering or additional text. Return only the JSON array."""
                             "gen_ts": self.now()
                         }
                         tweets.append(formatted_tweet)
-                logger.info(f"Parsed {len(tweets)} tweets from JSON response")
             except json.JSONDecodeError as e:
-                logger.warning(f"Failed to parse response as JSON: {str(e)}")
                 # If not JSON, split by newlines and create tweet objects
                 for i, line in enumerate(response.split('\n')):
-                    line = line.strip()
-                    if line and not line.startswith(('1.', '2.', '3.', '4.', '5.', '6.')):
+                    if line.strip():
                         tweets.append({
                             "index": i + 1,
-                            "text": line,
+                            "text": line.strip(),
                             "hashtags": ["#blockchain", "#crypto"],
                             "gen_ts": self.now()
                         })
-                logger.info(f"Created {len(tweets)} tweets from newline-split response")
             
             if not tweets:
                 error_msg = "No tweets generated"
-                logger.error(error_msg)
                 raise Exception(error_msg)
                 
             # Update the Google Sheet with the generated tweets
-            logger.info(f"Updating Google Sheet with {len(tweets)} tweets")
             self.sheets.update_row(current_row['id'], {
                 "generate_ts": self.now(),
                 "retry_count_generate": "0",
                 "tweets": json.dumps(tweets)  # Store as properly formatted JSON string
             })
             
-            logger.info(f"Generated {len(tweets)} tweets successfully")
             return {**state, "tweets": tweets}
         except Exception as e:
             error_msg = f"Error generating tweets: {str(e)}"
-            logger.error(error_msg)
             # Safely handle retry count
             retry_count = current_row.get('retry_count_generate', '0')
             try:
@@ -276,21 +252,16 @@ Do not include any numbering or additional text. Return only the JSON array."""
 
     async def store_tweets_node(self, state):
         if state.get('error'):
-            logger.error(f"Error in state: {state['error']}")
             return state
             
         if not state.get('tweets'):
             error_msg = "No tweets to store"
-            logger.error(error_msg)
             return {**state, "error": error_msg}
             
         current_row = state["current_row"]
         tweets = state["tweets"]
         
         try:
-            logger.info(f"Storing {len(tweets)} tweets")
-            
-            # Process tweets to ensure correct structure
             processed_tweets = []
             for tweet in tweets:
                 # Handle nested text object
@@ -314,7 +285,6 @@ Do not include any numbering or additional text. Return only the JSON array."""
             
             # Store the processed tweets
             self.tweet_storer.store_llm_tweets(current_row['id'], processed_tweets)
-            logger.info("Tweets stored successfully")
             
             # Update the Google Sheet with the processed tweets
             self.sheets.update_row(current_row['id'], {
@@ -326,7 +296,6 @@ Do not include any numbering or additional text. Return only the JSON array."""
             return {**state, "stored": True, "tweets": processed_tweets}
         except Exception as e:
             error_msg = f"Error storing tweets: {str(e)}"
-            logger.error(error_msg)
             # Safely handle retry count
             retry_count = current_row.get('retry_count_store', '0')
             try:
@@ -343,12 +312,10 @@ Do not include any numbering or additional text. Return only the JSON array."""
 
     async def post_to_twitter_node(self, state):
         if state.get('error'):
-            logger.error(f"Error in state: {state['error']}")
             return state
             
         if not state.get('tweets'):
             error_msg = "No tweets available to post"
-            logger.error(error_msg)
             return {**state, "error": error_msg}
             
         current_row = state["current_row"]
@@ -357,9 +324,7 @@ Do not include any numbering or additional text. Return only the JSON array."""
         try:
             # Post each tweet
             for tweet in tweets:
-                logger.info(f"Posting tweet: {tweet['text'][:50]}...")
-                self.twitter.post_tweet(tweet['text'])
-                logger.info("Tweet posted successfully")
+                await self.twitter.post_tweet(tweet['text'])
                 
             # Update the Google Sheet
             self.sheets.update_row(current_row['id'], {
@@ -368,11 +333,9 @@ Do not include any numbering or additional text. Return only the JSON array."""
                 "status": "in_progress"
             })
             
-            logger.info("All tweets posted successfully")
             return {**state, "posted": True}
         except Exception as e:
             error_msg = f"Error posting tweets: {str(e)}"
-            logger.error(error_msg)
             # Safely handle retry count
             retry_count = current_row.get('retry_count_post', '0')
             try:
@@ -501,12 +464,13 @@ Do not include any numbering or additional text. Return only the JSON array."""
 
     def completion_node(self, state):
         if not state.get('current_row'):
-            logger.info("No current row to complete")
+            # logger.info("No current row to complete")
             return {"end": True}
             
         row_id = state['current_row']['id']
         status = "complete" if not state.get('error') else "error"
         self.sheets.update_row(row_id, {"status": status, "last_update_ts": self.now()})
+        # logger.info(f"Workflow completed with result: {state}")
         return {"end": True}
 
     def build_workflow_graph(self):
