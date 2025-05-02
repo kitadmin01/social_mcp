@@ -96,3 +96,4 @@ class GoogleSheetsClient:
 
     def update_status(self, row_id: int, status: str):
         self.update_row(row_id, {'status': status})
+ 
