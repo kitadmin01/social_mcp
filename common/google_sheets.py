@@ -45,42 +45,79 @@ class GoogleSheetsClient:
             return False
 
     def get_pending_urls(self) -> List[Dict[str, Any]]:
-        rows = self.get_rows()
-        logger.info(f"Found {len(rows)} total rows in sheet")
+        """Get URLs from Google Sheet that need to be processed.
         
-        pending_rows = []
-        for row in rows:
-            url = row.get('url', '')
-            status = row.get('status', '').lower()
+        Returns:
+            List[Dict[str, Any]]: List of URLs with their row numbers
+        """
+        try:
+            logger.info("Fetching pending URLs from Google Sheet")
+            # Get all records from the worksheet
+            records = self.worksheet.get_all_records()
+            pending_urls = []
             
-            if status == 'pending':
-                logger.info(f"Found pending row {row.get('id')} with URL: {url}")
-                if self.is_valid_url(url):
-                    logger.info(f"Valid URL found: {url}")
-                    pending_rows.append(row)
-                else:
-                    logger.warning(f"Invalid URL in pending row {row.get('id')}: {url}")
-                    # Mark invalid URLs as error
-                    self.update_row(row['id'], {
-                        "status": "error",
-                        "processing_ts": datetime.utcnow().isoformat(),
-                        "retry_count_content": 0,
-                        "content_ts": datetime.utcnow().isoformat()
-                    })
-        
-        logger.info(f"Returning {len(pending_rows)} valid pending URLs")
-        return pending_rows
+            # Find rows where status is empty or pending
+            for i, record in enumerate(records, start=2):  # start=2 because row 1 is header
+                if (not record.get('status') or record.get('status').lower() == 'pending') and record.get('url'):
+                    # Create a properly formatted row with ID
+                    formatted_row = {
+                        'id': i,  # Use row number as ID
+                        'url': record.get('url', ''),
+                        'status': record.get('status', ''),
+                        'title': record.get('title', ''),
+                        'content': record.get('content', ''),
+                        'tweets': record.get('tweets', ''),
+                        'retry_count_content': record.get('retry_count_content', '0'),
+                        'retry_count_generate': record.get('retry_count_generate', '0'),
+                        'retry_count_post': record.get('retry_count_post', '0'),
+                        'retry_count_bsky': record.get('retry_count_bsky', '0'),
+                        'retry_count_telegram': record.get('retry_count_telegram', '0'),
+                        'processing_ts': record.get('processing_ts', ''),
+                        'content_ts': record.get('content_ts', ''),
+                        'generate_ts': record.get('generate_ts', ''),
+                        'post_ts': record.get('post_ts', ''),
+                        'bsky_ts': record.get('bsky_ts', ''),
+                        'telegram_ts': record.get('telegram_ts', ''),
+                        'last_update_ts': record.get('last_update_ts', '')
+                    }
+                    pending_urls.append(formatted_row)
+            
+            logger.info(f"Found {len(pending_urls)} pending URLs")
+            return pending_urls
+            
+        except Exception as e:
+            logger.error(f"Error getting pending URLs: {str(e)}")
+            return []
 
     def update_row(self, row_id: int, updates: Dict[str, Any]):
-        # Find the row index by id (assuming 'id' is unique and in the first column)
-        cell = self.worksheet.find(str(row_id))
-        row_idx = cell.row
-        for col, value in updates.items():
-            if col in COLUMNS:
-                col_idx = COLUMNS.index(col) + 1
-                self.worksheet.update_cell(row_idx, col_idx, value)
-        # Always update last_update_ts
-        self.worksheet.update_cell(row_idx, COLUMNS.index('last_update_ts') + 1, datetime.utcnow().isoformat())
+        """Update specific columns in a row.
+        
+        Args:
+            row_id (int): The row number to update (1-based index)
+            updates (Dict[str, Any]): Dictionary of column names and values to update
+        """
+        try:
+            # Get the header row to find column indices
+            headers = self.worksheet.row_values(1)
+            
+            # Update each column
+            for col, value in updates.items():
+                if col in headers:
+                    col_idx = headers.index(col) + 1  # Convert to 1-based index
+                    self.worksheet.update_cell(row_id, col_idx, str(value))
+                else:
+                    logger.warning(f"Column '{col}' not found in headers")
+            
+            # Always update last_update_ts
+            if 'last_update_ts' in headers:
+                last_update_idx = headers.index('last_update_ts') + 1
+                self.worksheet.update_cell(row_id, last_update_idx, datetime.utcnow().isoformat())
+            
+            logger.info(f"Updated row {row_id} with {len(updates)} fields")
+            
+        except Exception as e:
+            logger.error(f"Error updating row {row_id}: {str(e)}")
+            raise
 
     def store_tweets(self, row_id: int, tweets: Any):
         self.update_row(row_id, {

@@ -5,6 +5,7 @@ import requests
 from typing import Optional
 import logging
 import time
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,6 @@ class BlueskyAPI:
             repo = self.api_key  # This should be the DID (Decentralized Identifier)
             
         # Get current timestamp in the correct format for Bluesky
-        from datetime import datetime, timezone
         created_at = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
         
         payload = {
@@ -110,7 +110,6 @@ class BlueskyAPI:
             repo = self.api_key  # This should be the DID (Decentralized Identifier)
             
         # Get current timestamp in the correct format for Bluesky
-        from datetime import datetime, timezone
         created_at = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
         
         payload = {
@@ -135,7 +134,7 @@ class BlueskyAPI:
                 logger.error(f"Bad request. Response: {e.response.text}")
             raise
 
-    def search_and_like_blockchain(self, like_count: int = 1):
+    async def search_and_like_blockchain(self, like_count: int = 1) -> list:
         """Search for blockchain-related posts and like them.
         
         Args:
@@ -169,10 +168,30 @@ class BlueskyAPI:
                 except Exception as e:
                     logger.error(f"Failed to like post {i}: {str(e)}")
                     continue
-                    
+            
             logger.info(f"Completed liking {len(results)} posts")
             return results
             
         except Exception as e:
             logger.error(f"Error in search_and_like_blockchain: {str(e)}")
             raise
+
+    def post(self, text: str) -> bool:
+        """Post a text to Bluesky."""
+        try:
+            url = f"{self.base_url}/com.atproto.repo.createRecord"
+            payload = {
+                "repo": self.did,
+                "collection": "app.bsky.feed.post",
+                "record": {
+                    "text": text,
+                    "createdAt": datetime.now().isoformat(),
+                    "$type": "app.bsky.feed.post"
+                }
+            }
+            resp = self.session.post(url, json=payload)
+            resp.raise_for_status()
+            return True
+        except Exception as e:
+            logger.error(f"Error posting to Bluesky: {str(e)}")
+            return False

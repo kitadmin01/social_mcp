@@ -11,6 +11,7 @@ import os
 import logging
 from dotenv import load_dotenv
 import json
+from typing import Dict, Any
 
 from common.google_sheets import GoogleSheetsClient
 from common.llm_orchestrator import LLMOrchestrator
@@ -20,6 +21,7 @@ from mcp_server.tools.store_tweets import StoreTweets
 from mcp_server.tools.post_tweets import TwitterPlaywright
 from mcp_server.tools.bsky import BlueskyAPI
 from mcp_server.tools.schedule_post import SchedulePost
+from mcp_server.tools.telegram_post import TelegramPoster
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -48,6 +50,7 @@ class WorkflowGraph:
         self.twitter = TwitterPlaywright()
         self.bsky = BlueskyAPI()
         self.scheduler = SchedulePost(self.sheets)
+        self.telegram = TelegramPoster()
 
     def now(self):
         return datetime.utcnow().isoformat()
@@ -78,18 +81,31 @@ class WorkflowGraph:
                 url = row.get('url', '')
                 
                 if self.is_valid_url(url):
+                    # Ensure row has an ID
+                    if 'id' not in row:
+                        logger.error(f"Row missing ID: {row}")
+                        continue
+                        
                     self.sheets.update_row(row['id'], {"status": "in_progress", "processing_ts": self.now()})
                     valid_rows.append(row)
                 else:
-                    self.sheets.update_row(row['id'], {
-                        "status": "error",
-                        "processing_ts": self.now(),
-                        "retry_count_content": 0,
-                        "content_ts": self.now()
-                    })
+                    # Only update if row has an ID
+                    if 'id' in row:
+                        self.sheets.update_row(row['id'], {
+                            "status": "error",
+                            "processing_ts": self.now(),
+                            "retry_count_content": 0,
+                            "content_ts": self.now()
+                        })
             
-            return {"rows": valid_rows, "current_row": None, "text": None, "tweets": None}
+            # If no valid rows, still continue with engagement
+            if not valid_rows:
+                logger.info("No valid rows found to process, continuing with engagement")
+                return {"rows": [], "current_row": None, "text": None, "tweets": None, "engagement_only": True}
+                
+            return {"rows": valid_rows, "current_row": None, "text": None, "tweets": None, "engagement_only": False}
         except Exception as e:
+            logger.error(f"Error in batch_retrieval: {str(e)}")
             return {"error": str(e)}
 
     async def extract_content_node(self, state):
@@ -388,41 +404,44 @@ Do not include any numbering or additional text. Return only the JSON array."""
             return {**state, "error": str(e)}
 
     async def engage_posts_node(self, state):
-        if "error" in state:
+        if state.get('error'):
             return state
             
-        if not state.get('posted_to_bsky'):
-            logger.error("No tweets posted to Bluesky")
-            return {**state, "error": "No tweets posted to Bluesky"}
-            
-        current_row = state["current_row"]
+        # Allow engagement even if no tweets were posted
+        if state.get('engagement_only') or state.get('posted'):
+            try:
+                # Like blockchain tweets
+                await self.twitter.like_blockchain_tweets(min_likes=3, max_likes=5)
+                
+                # Like blockchain posts on Bluesky
+                self.bsky.search_and_like_blockchain(like_count=3)
+                
+                # Update the Google Sheet if we have a current row
+                if state.get('current_row'):
+                    self.sheets.update_row(state['current_row']['id'], {
+                        "engagement_ts": self.now(),
+                        "retry_count_engagement": "0",
+                        "status": "in_progress"
+                    })
+                
+                return {**state, "engaged": True}
+            except Exception as e:
+                error_msg = f"Error engaging with posts: {str(e)}"
+                if state.get('current_row'):
+                    retry_count = state['current_row'].get('retry_count_engagement', '0')
+                    try:
+                        current_retry = int(retry_count) if retry_count else 0
+                    except ValueError:
+                        current_retry = 0
+                        
+                    self.sheets.update_row(state['current_row']['id'], {
+                        "status": "error",
+                        "retry_count_engagement": str(current_retry + 1),
+                        "engagement_ts": self.now()
+                    })
+                return {**state, "error": error_msg}
         
-        try:
-            # Get posted tweets from database
-            posted_tweets = self.db.get_posted_tweets(current_row['id'])
-            if not posted_tweets:
-                logger.error("No posted tweets found")
-                return {**state, "error": "No posted tweets found"}
-                
-            # Engage with each tweet
-            for tweet in posted_tweets:
-                self.bsky.like_post(tweet['bsky_id'])
-                self.bsky.repost_post(tweet['bsky_id'])
-                
-            self.sheets.update_row(current_row['id'], {
-                "engagement_ts": self.now(),
-                "retry_count_engagement": "0",
-                "status": "completed"
-            })
-            return {**state, "engaged": True}
-        except Exception as e:
-            logger.error(f"Error engaging with posts: {str(e)}")
-            self.sheets.update_row(current_row['id'], {
-                "status": "error",
-                "retry_count_engagement": str(int(current_row.get('retry_count_engagement', '0')) + 1),
-                "engagement_ts": self.now()
-            })
-            return {**state, "error": str(e)}
+        return state
 
     async def schedule_followups_node(self, state):
         if "error" in state:
@@ -462,6 +481,53 @@ Do not include any numbering or additional text. Return only the JSON array."""
             })
             return {**state, "error": str(e)}
 
+    async def post_to_telegram_node(self, state):
+        """Post content to Telegram channel."""
+        if state.get('error'):
+            return state
+            
+        if not state.get('text'):
+            error_msg = "No content available to post to Telegram"
+            return {**state, "error": error_msg}
+            
+        current_row = state["current_row"]
+        text = state["text"]
+        
+        try:
+            # Format content for Telegram
+            content = {
+                'title': current_row.get('title', 'New Post'),
+                'content': text,
+                'url': current_row.get('url', '')
+            }
+            
+            # Post to Telegram
+            result = self.telegram.process_and_post(limit=1)
+            
+            # Update the Google Sheet
+            self.sheets.update_row(current_row['id'], {
+                "telegram_ts": self.now(),
+                "retry_count_telegram": "0",
+                "status": "in_progress"
+            })
+            
+            return {**state, "posted_to_telegram": True}
+        except Exception as e:
+            error_msg = f"Error posting to Telegram: {str(e)}"
+            # Safely handle retry count
+            retry_count = current_row.get('retry_count_telegram', '0')
+            try:
+                current_retry = int(retry_count) if retry_count else 0
+            except ValueError:
+                current_retry = 0
+                
+            self.sheets.update_row(current_row['id'], {
+                "status": "error",
+                "retry_count_telegram": str(current_retry + 1),
+                "telegram_ts": self.now()
+            })
+            return {**state, "error": error_msg}
+
     def completion_node(self, state):
         if not state.get('current_row'):
             # logger.info("No current row to complete")
@@ -473,6 +539,18 @@ Do not include any numbering or additional text. Return only the JSON array."""
         # logger.info(f"Workflow completed with result: {state}")
         return {"end": True}
 
+    def get_status(self) -> Dict[str, Any]:
+        """Get current status of all platforms.
+        
+        Returns:
+            Dict[str, Any]: Status information for each platform
+        """
+        return {
+            'telegram': self.telegram.get_status() if hasattr(self.telegram, 'get_status') else None,
+            'twitter': self.twitter.get_status() if hasattr(self.twitter, 'get_status') else None,
+            'bluesky': self.bsky.get_status() if hasattr(self.bsky, 'get_status') else None
+        }
+
     def build_workflow_graph(self):
         from typing import TypedDict, List, Dict, Any, Optional
         from langgraph.graph import StateGraph
@@ -483,12 +561,14 @@ Do not include any numbering or additional text. Return only the JSON array."""
             text: Optional[str]
             tweets: Optional[List[Dict[str, Any]]]
             error: Optional[str]
+            engagement_only: Optional[bool]
 
         graph = StateGraph(WorkflowState)
         
         # Add nodes
         graph.add_node("batch_retrieval", RunnableLambda(self.batch_retrieval))
         graph.add_node("extract_content", RunnableLambda(self.extract_content_node))
+        graph.add_node("post_to_telegram", RunnableLambda(self.post_to_telegram_node))
         graph.add_node("generate_tweets", RunnableLambda(self.generate_tweets_node))
         graph.add_node("store_tweets", RunnableLambda(self.store_tweets_node))
         graph.add_node("post_to_twitter", RunnableLambda(self.post_to_twitter_node))
@@ -499,7 +579,8 @@ Do not include any numbering or additional text. Return only the JSON array."""
 
         # Add edges
         graph.add_edge("batch_retrieval", "extract_content")
-        graph.add_edge("extract_content", "generate_tweets")
+        graph.add_edge("extract_content", "post_to_telegram")
+        graph.add_edge("post_to_telegram", "generate_tweets")
         graph.add_edge("generate_tweets", "store_tweets")
         graph.add_edge("store_tweets", "post_to_twitter")
         graph.add_edge("post_to_twitter", "post_to_bsky")
@@ -508,19 +589,31 @@ Do not include any numbering or additional text. Return only the JSON array."""
         graph.add_edge("schedule_followups", "completion")
         graph.add_edge("completion", END)
 
+        # Add conditional edges for engagement-only path
+        def should_engage_only(state):
+            return state.get('engagement_only', False)
+
+        graph.add_conditional_edges(
+            "batch_retrieval",
+            {
+                "extract_content": lambda x: not should_engage_only(x),
+                "engage_posts": should_engage_only
+            }
+        )
+
         # Add error handling edges
         def has_error(state):
             return "error" in state
 
         graph.add_conditional_edges(
-            "batch_retrieval",
+            "extract_content",
             {
-                "extract_content": lambda x: not has_error(x),
+                "post_to_telegram": lambda x: not has_error(x),
                 "completion": has_error
             }
         )
         graph.add_conditional_edges(
-            "extract_content",
+            "post_to_telegram",
             {
                 "generate_tweets": lambda x: not has_error(x),
                 "completion": has_error
@@ -572,4 +665,12 @@ Do not include any numbering or additional text. Return only the JSON array."""
         graph.set_entry_point("batch_retrieval")
         
         # Compile the graph
-        return graph.compile() 
+        return graph.compile()
+
+    async def cleanup(self):
+        """Cleanup resources."""
+        try:
+            if hasattr(self.twitter, 'close_session'):
+                await self.twitter.close_session()
+        except Exception as e:
+            logger.error(f"Error during cleanup: {str(e)}") 
