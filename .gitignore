@@ -70,3 +70,5 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg 
+
+/playwright_session/*

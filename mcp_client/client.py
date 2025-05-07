@@ -70,6 +70,10 @@ async def run_workflow():
         server_params = StdioServerParameters(
             command="python",
             args=[os.path.join(project_root, "mcp_server/server.py")],
+            env={
+                **os.environ,  # Pass through all environment variables
+                "HEADLESS": os.getenv("HEADLESS", "true")  # Ensure HEADLESS is set
+            }
         )
 
         async with stdio_client(server_params) as (read, write):
