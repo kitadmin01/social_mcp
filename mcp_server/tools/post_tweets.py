@@ -356,113 +356,78 @@ class TwitterPlaywright:
             if not self._logged_in:
                 await self._init_browser()
             
-            # Navigate to home page first with retry
-            logger.info("Navigating to home page...")
-            home_navigated = False
-            
-            # Try multiple approaches to get to home page
-            for attempt in range(3):
-                try:
-                    # First try direct navigation
-                    await self.page.goto('https://twitter.com/home', wait_until='networkidle', timeout=30000)
-                    await self.page.wait_for_timeout(5000)
-                    
-                    # Try multiple selectors to verify we're on home page
-                    for selector in [
-                        '[data-testid="primaryColumn"]',
-                        '[data-testid="SideNav_NewTweet_Button"]',
-                        'a[href="/home"]',
-                        'div[data-testid="AppTabBar_Home_Link"]'
-                    ]:
-                        try:
-                            if await self.page.wait_for_selector(selector, timeout=5000):
-                                home_navigated = True
-                                break
-                        except:
-                            continue
-                    
-                    if home_navigated:
-                        break
-                        
-                    # If direct navigation failed, try clicking home link
-                    try:
-                        home_link = await self.page.wait_for_selector('a[href="/home"]', timeout=5000)
-                        if home_link:
-                            await home_link.click()
-                            await self.page.wait_for_timeout(5000)
-                            home_navigated = True
-                            break
-                    except:
-                        pass
-                        
-                except Exception as e:
-                    if attempt == 2:  # Last attempt
-                        raise Exception(f"Failed to navigate to home page: {str(e)}")
-                    logger.warning(f"Navigation attempt {attempt + 1} failed, retrying...")
-                    await self.page.reload()
-                    await self.page.wait_for_timeout(5000)
-            
-            if not home_navigated:
-                raise Exception("Failed to navigate to home page after multiple attempts")
-            
-            # Click the tweet button - try multiple selectors
-            logger.info("Clicking tweet button...")
-            tweet_button = None
-            
-            # First try the + button
+            # Try to find the tweet button directly first
+            logger.info("Looking for tweet button...")
             try:
-                tweet_button = await self.page.wait_for_selector('[data-testid="SideNav_NewTweet_Button"]', timeout=10000)
+                # Try the sidebar tweet button first
+                tweet_button = await self.page.query_selector('[data-testid="SideNav_NewTweet_Button"]')
                 if tweet_button:
+                    logger.info("Found sidebar tweet button, clicking...")
                     await tweet_button.click()
-            except:
-                pass
-            
-            # If not found, try compose tweet link
-            if not tweet_button:
-                try:
-                    tweet_button = await self.page.wait_for_selector('a[href="/compose/tweet"]', timeout=10000)
+                    await self.page.wait_for_timeout(2000)
+                else:
+                    # If sidebar button not found, try the floating tweet button
+                    tweet_button = await self.page.query_selector('[data-testid="tweetButtonInline"]')
                     if tweet_button:
+                        logger.info("Found floating tweet button, clicking...")
                         await tweet_button.click()
-                except:
-                    pass
-            
-            # If still not found, try the tweet textarea directly
-            if not tweet_button:
-                try:
-                    tweet_button = await self.page.wait_for_selector('[data-testid="tweetTextarea_0"]', timeout=10000)
-                    if tweet_button:
-                        await tweet_button.click()
-                except:
-                    pass
-            
-            if not tweet_button:
-                raise Exception("Could not find tweet button")
+                        await self.page.wait_for_timeout(2000)
+                    else:
+                        # If no tweet button found, try to click the tweet textarea directly
+                        tweet_textarea = await self.page.query_selector('[data-testid="tweetTextarea_0"]')
+                        if tweet_textarea:
+                            logger.info("Found tweet textarea, clicking...")
+                            await tweet_textarea.click()
+                            await self.page.wait_for_timeout(2000)
+                        else:
+                            # If nothing found, try to navigate to compose tweet URL
+                            logger.info("No tweet buttons found, navigating to compose URL...")
+                            await self.page.goto('https://twitter.com/compose/tweet', wait_until='domcontentloaded', timeout=30000)
+                            await self.page.wait_for_timeout(3000)
+            except Exception as e:
+                logger.warning(f"Error finding tweet button: {str(e)}")
+                # Fallback to compose URL
+                logger.info("Falling back to compose URL...")
+                await self.page.goto('https://twitter.com/compose/tweet', wait_until='domcontentloaded', timeout=30000)
+                await self.page.wait_for_timeout(3000)
             
             # Wait for tweet compose dialog
             logger.info("Waiting for tweet compose dialog...")
-            await self.page.wait_for_selector('[data-testid="tweetTextarea_0"]', timeout=10000)
-            await self.page.wait_for_timeout(2000)
+            try:
+                await self.page.wait_for_selector('[data-testid="tweetTextarea_0"]', timeout=10000)
+            except Exception as e:
+                logger.error(f"Could not find tweet textarea: {str(e)}")
+                return False
             
             # Enter tweet text
             logger.info("Entering tweet text...")
             tweet_input = await self.page.wait_for_selector('[data-testid="tweetTextarea_0"]', timeout=10000)
             if not tweet_input:
-                raise Exception("Could not find tweet input field")
+                logger.error("Could not find tweet input field")
+                return False
+            
             await tweet_input.fill(text)
             await self.page.wait_for_timeout(2000)
             
-            # Click post button - try multiple approaches
+            # Click post button with multiple approaches
             logger.info("Clicking post button...")
             post_success = False
             
-            # Try multiple selectors and click methods
-            for selector in [
+            # List of possible post button selectors
+            post_button_selectors = [
                 '[data-testid="tweetButton"]',
                 'div[role="button"]:has-text("Post")',
-                'div[role="button"]:has-text("Tweet")'
-            ]:
+                'div[role="button"]:has-text("Tweet")',
+                'div[data-testid="tweetButtonInline"]',
+                'div[role="button"][data-testid="tweetButton"]',
+                'div[role="button"][data-testid="tweetButtonInline"]'
+            ]
+            
+            # Try each selector with multiple click methods
+            for selector in post_button_selectors:
                 try:
-                    # Wait for the button to be visible and clickable
+                    logger.info(f"Trying post button selector: {selector}")
+                    # Wait for button to be visible
                     post_button = await self.page.wait_for_selector(selector, state='visible', timeout=5000)
                     if post_button:
                         # Try multiple click methods
@@ -470,78 +435,67 @@ class TwitterPlaywright:
                             # Method 1: Direct click
                             await post_button.click()
                             post_success = True
-                        except:
+                            break
+                        except Exception as e:
+                            logger.warning(f"Direct click failed: {str(e)}")
                             try:
                                 # Method 2: JavaScript click
                                 await self.page.evaluate('(button) => button.click()', post_button)
                                 post_success = True
-                            except:
+                                break
+                            except Exception as e:
+                                logger.warning(f"JavaScript click failed: {str(e)}")
                                 try:
-                                    # Method 3: Click by text
-                                    await self.page.get_by_text("Post").click()
-                                    post_success = True
-                                except:
-                                    pass
-                        
-                        if post_success:
-                            break
-                except:
+                                    # Method 3: Click by text content
+                                    button_text = await post_button.text_content()
+                                    if button_text:
+                                        await self.page.get_by_text(button_text).click()
+                                        post_success = True
+                                        break
+                                except Exception as e:
+                                    logger.warning(f"Text click failed: {str(e)}")
+                except Exception as e:
+                    logger.warning(f"Failed with selector {selector}: {str(e)}")
                     continue
             
             if not post_success:
-                raise Exception("Could not click post button")
+                # Last resort: Try to find and click any button that looks like a post button
+                try:
+                    logger.info("Trying to find post button by role and text...")
+                    buttons = await self.page.query_selector_all('div[role="button"]')
+                    for button in buttons:
+                        text = await button.text_content()
+                        if text and ('Post' in text or 'Tweet' in text):
+                            await button.click()
+                            post_success = True
+                            break
+                except Exception as e:
+                    logger.warning(f"Last resort button click failed: {str(e)}")
+            
+            if not post_success:
+                logger.error("Could not click post button")
+                return False
             
             # Wait for post to complete
             logger.info("Waiting for post to complete...")
             try:
-                # Wait for network to be idle
                 await self.page.wait_for_load_state('networkidle', timeout=10000)
                 await self.page.wait_for_timeout(5000)
                 
-                # Verify post was successful - try multiple indicators
-                post_verified = False
-                
-                # First check if compose dialog is gone
+                # Verify post was successful
                 try:
+                    # Wait for compose dialog to disappear
                     await self.page.wait_for_selector('[data-testid="tweetTextarea_0"]', state='hidden', timeout=5000)
-                    post_verified = True
-                except:
-                    pass
-                
-                # If compose dialog is still visible, check for success indicators
-                if not post_verified:
-                    for selector in [
-                        '[data-testid="toast"]',
-                        '[data-testid="success"]',
-                        'div[role="alert"]'
-                    ]:
-                        try:
-                            await self.page.wait_for_selector(selector, timeout=5000)
-                            post_verified = True
-                            break
-                        except:
-                            continue
-                
-                # If still not verified, check if we can find the posted tweet
-                if not post_verified:
-                    try:
-                        # Wait for the tweet to appear in the timeline
-                        await self.page.wait_for_selector(f'div[data-testid="tweetText"]:has-text("{text[:50]}")', timeout=5000)
-                        post_verified = True
-                    except:
-                        pass
-                
-                if post_verified:
-                    logger.info(f"Successfully posted tweet: {text[:50]}...")
+                    logger.info("Tweet posted successfully")
                     return True
-                else:
-                    # Even if we can't verify, assume success and continue
-                    logger.warning("Could not verify post success, but continuing...")
+                except Exception as e:
+                    logger.warning(f"Could not verify post success: {str(e)}")
+                    # Even if we can't verify, assume success
                     return True
                     
             except Exception as e:
-                # Even if we get an error, assume success and continue
-                logger.warning(f"Error during post verification: {str(e)}, but continuing...")
+                logger.warning(f"Error during post verification: {str(e)}")
+                # Even if we get an error, assume success
                 return True
             
         except Exception as e:

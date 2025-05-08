@@ -140,7 +140,7 @@ async def engage_twitter(count: int = 5) -> str:
     """Engage with tweets on Twitter."""
     try:
         logger.info(f"Engaging with {count} tweets on Twitter")
-        await twitter.like_blockchain_tweets(min_likes=count, max_likes=count)
+        await twitter.search_and_like_tweets(search_term="#blockchain", max_likes=count)
         return f"Engaged with {count} tweets on Twitter"
     except Exception as e:
         logger.error(f"Error engaging with Twitter: {str(e)}")

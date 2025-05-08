@@ -367,41 +367,43 @@ Do not include any numbering or additional text. Return only the JSON array."""
             return {**state, "error": error_msg}
 
     async def post_to_bsky_node(self, state):
-        if "error" in state:
+        if state.get('error'):
             return state
             
-        if not state.get('posted'):
-            logger.error("No tweets posted to Bluesky")
-            return {**state, "error": "No tweets posted"}
+        if not state.get('tweets'):
+            error_msg = "No tweets available to post to Bluesky"
+            return {**state, "error": error_msg}
             
         current_row = state["current_row"]
+        tweets = state["tweets"]
         
         try:
-            # Get posted tweets from database
-            posted_tweets = self.db.get_posted_tweets(current_row['id'])
-            if not posted_tweets:
-                logger.error("No posted tweets found")
-                return {**state, "error": "No posted tweets found"}
-                
             # Post each tweet to Bluesky
-            for tweet in posted_tweets:
-                self.bsky.post_tweet(tweet['text'])
-                self.db.update_tweet_status(tweet['id'], "posted_to_bsky")
+            for tweet in tweets:
+                await self.bsky.create_post(tweet['text'])
                 
+            # Update the Google Sheet
             self.sheets.update_row(current_row['id'], {
                 "bsky_ts": self.now(),
                 "retry_count_bsky": "0",
-                "status": "completed"
+                "status": "in_progress"
             })
             return {**state, "posted_to_bsky": True}
         except Exception as e:
-            logger.error(f"Error posting to Bluesky: {str(e)}")
+            error_msg = f"Error posting to Bluesky: {str(e)}"
+            # Safely handle retry count
+            retry_count = current_row.get('retry_count_bsky', '0')
+            try:
+                current_retry = int(retry_count) if retry_count else 0
+            except ValueError:
+                current_retry = 0
+                
             self.sheets.update_row(current_row['id'], {
                 "status": "error",
-                "retry_count_bsky": str(int(current_row.get('retry_count_bsky', '0')) + 1),
+                "retry_count_bsky": str(current_retry + 1),
                 "bsky_ts": self.now()
             })
-            return {**state, "error": str(e)}
+            return {**state, "error": error_msg}
 
     async def engage_posts_node(self, state):
         if state.get('error'):
@@ -411,10 +413,14 @@ Do not include any numbering or additional text. Return only the JSON array."""
         if state.get('engagement_only') or state.get('posted'):
             try:
                 # Like blockchain tweets
-                await self.twitter.like_blockchain_tweets(min_likes=3, max_likes=5)
+                logger.info("Engaging with Twitter posts...")
+                await self.twitter.search_and_like_tweets(search_term="#blockchain", max_likes=5)
+                logger.info("Twitter engagement completed")
                 
                 # Like blockchain posts on Bluesky
-                self.bsky.search_and_like_blockchain(like_count=3)
+                logger.info("Engaging with Bluesky posts...")
+                await self.bsky.search_and_like_blockchain(like_count=3)
+                logger.info("Bluesky engagement completed")
                 
                 # Update the Google Sheet if we have a current row
                 if state.get('current_row'):
@@ -427,6 +433,7 @@ Do not include any numbering or additional text. Return only the JSON array."""
                 return {**state, "engaged": True}
             except Exception as e:
                 error_msg = f"Error engaging with posts: {str(e)}"
+                logger.error(error_msg)
                 if state.get('current_row'):
                     retry_count = state['current_row'].get('retry_count_engagement', '0')
                     try:
