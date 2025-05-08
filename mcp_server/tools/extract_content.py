@@ -1,31 +1,17 @@
-from playwright.async_api import async_playwright
+import requests
+from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 import logging
-import asyncio
+import time
 
 logger = logging.getLogger(__name__)
 
 class ExtractContent:
     def __init__(self):
-        self.playwright = None
-        self.browser = None
-        self.context = None
-
-    async def initialize(self):
-        if not self.playwright:
-            self.playwright = await async_playwright().start()
-            self.browser = await self.playwright.chromium.launch(headless=True)
-            self.context = await self.browser.new_context(
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-            )
-
-    async def cleanup(self):
-        if self.context:
-            await self.context.close()
-        if self.browser:
-            await self.browser.close()
-        if self.playwright:
-            await self.playwright.stop()
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        })
 
     def is_valid_url(self, url: str) -> bool:
         if not isinstance(url, str):
@@ -51,38 +37,76 @@ class ExtractContent:
             
         logger.info(f"Extracting content from valid URL: {url}")
         try:
-            await self.initialize()
-            page = await self.context.new_page()
-            await page.goto(url, wait_until="networkidle")
-            # Wait for content to load
-            await asyncio.sleep(2)
+            # Add retry logic for requests
+            max_retries = 3
+            retry_delay = 2
             
-            # Try to get the main content
-            content = await page.evaluate("""
-                () => {
-                    // Try to find the main article content
-                    const article = document.querySelector('article') || 
-                                  document.querySelector('.article') ||
-                                  document.querySelector('.post-content') ||
-                                  document.querySelector('.entry-content') ||
-                                  document.querySelector('main');
-                    
-                    if (article) {
-                        return article.innerText;
-                    }
-                    
-                    // Fallback to body text
-                    return document.body.innerText;
-                }
-            """)
+            for attempt in range(max_retries):
+                try:
+                    response = self.session.get(url, timeout=30)
+                    response.raise_for_status()
+                    break
+                except requests.exceptions.RequestException as e:
+                    if attempt == max_retries - 1:
+                        raise
+                    logger.warning(f"Request failed (attempt {attempt + 1}/{max_retries}): {str(e)}")
+                    time.sleep(retry_delay * (attempt + 1))
             
-            await page.close()
+            soup = BeautifulSoup(response.text, 'html.parser')
             
-            if not content or len(content.strip()) < 100:
-                logger.warning(f"Extracted content too short from URL: {url}")
-                return ""
+            # Try to find the main article content with more specific selectors
+            selectors = [
+                'article',
+                '.article',
+                '.post-content',
+                '.entry-content',
+                'main',
+                '.content',
+                '#content',
+                '.post',
+                '.article-content',
+                '.story-content',
+                '.article-body',
+                '.post-body',
+                '.entry',
+                '.blog-post',
+                '.news-content'
+            ]
+            
+            # Try each selector
+            for selector in selectors:
+                element = soup.select_one(selector)
+                if element:
+                    # Get text content and clean it
+                    text = element.get_text(separator=' ', strip=True)
+                    # Remove extra whitespace
+                    text = ' '.join(text.split())
+                    if len(text) > 100:
+                        return text
+            
+            # If no specific content found, try to get the main content area
+            main_content = soup.select_one('main') or soup.select_one('#main') or soup.select_one('.main')
+            
+            if main_content:
+                text = main_content.get_text(separator=' ', strip=True)
+                text = ' '.join(text.split())
+                if len(text) > 100:
+                    return text
+            
+            # Fallback to body text, but exclude navigation and footer
+            body = soup.body
+            if body:
+                # Remove navigation and footer
+                for element in body.select('nav, footer, header, .nav, .footer, .header'):
+                    element.decompose()
                 
-            return content.strip()
+                text = body.get_text(separator=' ', strip=True)
+                text = ' '.join(text.split())
+                if len(text) > 100:
+                    return text
+            
+            logger.warning(f"Could not find sufficient content from URL: {url}")
+            return ""
             
         except Exception as e:
             logger.error(f"Error extracting content from {url}: {str(e)}")

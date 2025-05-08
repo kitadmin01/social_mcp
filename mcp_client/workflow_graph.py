@@ -74,34 +74,86 @@ class WorkflowGraph:
 
     async def batch_retrieval(self, state):
         try:
-            rows = self.sheets.get_pending_urls()[:self.M]
-            
-            valid_rows = []
-            for row in rows:
-                url = row.get('url', '')
+            # Get Sheet1 for Twitter/Bluesky content
+            sheet1 = self.sheets.sheet.worksheet("Sheet1")
+            if not sheet1:
+                logger.error("Sheet1 not found")
+                return {"error": "Sheet1 not found"}
                 
-                if self.is_valid_url(url):
-                    # Ensure row has an ID
-                    if 'id' not in row:
-                        logger.error(f"Row missing ID: {row}")
-                        continue
-                        
-                    self.sheets.update_row(row['id'], {"status": "in_progress", "processing_ts": self.now()})
-                    valid_rows.append(row)
-                else:
-                    # Only update if row has an ID
-                    if 'id' in row:
-                        self.sheets.update_row(row['id'], {
-                            "status": "error",
-                            "processing_ts": self.now(),
-                            "retry_count_content": 0,
-                            "content_ts": self.now()
-                        })
+            # Get headers and verify required columns for Sheet1
+            headers1 = sheet1.row_values(1)
+            required_columns1 = ['url', 'status', 'processing_ts']
+            missing_columns1 = [col for col in required_columns1 if col not in headers1]
             
-            # If no valid rows, still continue with engagement
+            if missing_columns1:
+                logger.error(f"Missing required columns in Sheet1: {missing_columns1}")
+                return {"error": f"Missing required columns in Sheet1: {missing_columns1}"}
+            
+            # Get column indices for Sheet1
+            col_indices1 = {col: headers1.index(col) + 1 for col in headers1}
+            
+            # Get pending URLs from Sheet1
+            records1 = sheet1.get_all_records()
+            pending_urls1 = []
+            
+            # Find rows where status is empty and url is not empty
+            for i, record in enumerate(records1, start=2):
+                if not record.get('status') and record.get('url'):
+                    pending_urls1.append({
+                        'id': i,
+                        'url': record['url'],
+                        'status': 'in_progress',
+                        'sheet': 'Sheet1'
+                    })
+            
+            # Get Sheet2 for Telegram content
+            sheet2 = self.sheets.sheet.worksheet("Sheet2")
+            if not sheet2:
+                logger.error("Sheet2 not found")
+                return {"error": "Sheet2 not found"}
+                
+            # Get headers and verify required columns for Sheet2
+            headers2 = sheet2.row_values(1)
+            required_columns2 = ['tele_urls', 'status', 'error', 'update_ts']
+            missing_columns2 = [col for col in required_columns2 if col not in headers2]
+            
+            if missing_columns2:
+                logger.error(f"Missing required columns in Sheet2: {missing_columns2}")
+                return {"error": f"Missing required columns in Sheet2: {missing_columns2}"}
+            
+            # Get column indices for Sheet2
+            col_indices2 = {col: headers2.index(col) + 1 for col in headers2}
+            
+            # Get pending URLs from Sheet2
+            records2 = sheet2.get_all_records()
+            pending_urls2 = []
+            
+            # Find rows where status is "pending" and tele_urls is not empty
+            for i, record in enumerate(records2, start=2):
+                if record.get('status') == 'pending' and record.get('tele_urls'):
+                    pending_urls2.append({
+                        'id': i,
+                        'url': record['tele_urls'],
+                        'status': 'in_progress',
+                        'sheet': 'Sheet2'
+                    })
+            
+            # Combine and take only the first M URLs
+            all_pending = pending_urls1 + pending_urls2
+            valid_rows = all_pending[:self.M]
+            
             if not valid_rows:
                 logger.info("No valid rows found to process, continuing with engagement")
                 return {"rows": [], "current_row": None, "text": None, "tweets": None, "engagement_only": True}
+            
+            # Update status for selected rows
+            for row in valid_rows:
+                if row['sheet'] == 'Sheet1':
+                    sheet1.update_cell(row['id'], col_indices1['status'], "in_progress")
+                    sheet1.update_cell(row['id'], col_indices1['processing_ts'], self.now())
+                else:  # Sheet2
+                    sheet2.update_cell(row['id'], col_indices2['status'], "in_progress")
+                    sheet2.update_cell(row['id'], col_indices2['update_ts'], self.now())
                 
             return {"rows": valid_rows, "current_row": None, "text": None, "tweets": None, "engagement_only": False}
         except Exception as e:
@@ -126,10 +178,20 @@ class WorkflowGraph:
             
         try:
             text = await retry_with_backoff(try_extract, max_retries=3)
-            self.sheets.update_row(row['id'], {
-                "content_ts": self.now(),
-                "retry_count_content": "0"  # Reset retry count on success
-            })
+            
+            # Update the appropriate sheet
+            if row['sheet'] == 'Sheet1':
+                sheet = self.sheets.sheet.worksheet("Sheet1")
+                headers = sheet.row_values(1)
+                col_indices = {col: headers.index(col) + 1 for col in headers}
+                sheet.update_cell(row['id'], col_indices['content_ts'], self.now())
+                sheet.update_cell(row['id'], col_indices['retry_count_content'], "0")
+            else:  # Sheet2
+                sheet = self.sheets.sheet.worksheet("Sheet2")
+                headers = sheet.row_values(1)
+                col_indices = {col: headers.index(col) + 1 for col in headers}
+                sheet.update_cell(row['id'], col_indices['update_ts'], self.now())
+                
             return {
                 **state,
                 "current_row": row,
@@ -137,18 +199,27 @@ class WorkflowGraph:
                 "rows": state['rows'][1:]  # Remove the processed row
             }
         except Exception as e:
-            # Safely handle retry count
-            retry_count = row.get('retry_count_content', '0')
-            try:
-                current_retry = int(retry_count) if retry_count else 0
-            except ValueError:
-                current_retry = 0
+            # Update error in the appropriate sheet
+            if row['sheet'] == 'Sheet1':
+                sheet = self.sheets.sheet.worksheet("Sheet1")
+                headers = sheet.row_values(1)
+                col_indices = {col: headers.index(col) + 1 for col in headers}
+                retry_count = row.get('retry_count_content', '0')
+                try:
+                    current_retry = int(retry_count) if retry_count else 0
+                except ValueError:
+                    current_retry = 0
+                sheet.update_cell(row['id'], col_indices['status'], "error")
+                sheet.update_cell(row['id'], col_indices['retry_count_content'], str(current_retry + 1))
+                sheet.update_cell(row['id'], col_indices['content_ts'], self.now())
+            else:  # Sheet2
+                sheet = self.sheets.sheet.worksheet("Sheet2")
+                headers = sheet.row_values(1)
+                col_indices = {col: headers.index(col) + 1 for col in headers}
+                sheet.update_cell(row['id'], col_indices['status'], "error")
+                sheet.update_cell(row['id'], col_indices['error'], str(e))
+                sheet.update_cell(row['id'], col_indices['update_ts'], self.now())
                 
-            self.sheets.update_row(row['id'], {
-                "status": "error",
-                "retry_count_content": str(current_retry + 1),  # Convert to string for Google Sheets
-                "content_ts": self.now()
-            })
             return {
                 **state,
                 "current_row": row,
@@ -164,106 +235,43 @@ class WorkflowGraph:
             error_msg = "No text content available for tweet generation"
             return {**state, "error": error_msg}
             
-        text = state["text"]
         current_row = state["current_row"]
-        
-        prompt = f"""Generate 6 engaging tweets about the following content. Each tweet should be unique and include relevant hashtags.
-
-Content: {text}
-
-Format each tweet as a JSON object with these exact fields:
-- text: The tweet text (under 280 characters)
-- hashtags: List of relevant hashtags
-
-Return the tweets as a JSON array. Example format:
-[
-  {{
-    "text": "Exploring blockchain technology and its impact on finance",
-    "hashtags": ["Blockchain", "Finance"]
-  }},
-  {{
-    "text": "The future of decentralized applications",
-    "hashtags": ["DApps", "Web3"]
-  }}
-]
-
-Do not include any numbering or additional text. Return only the JSON array."""
+        if current_row.get('sheet') != 'Sheet1':
+            # Skip if not from Sheet1
+            return {**state, "skipped": True, "reason": "Not a Twitter/Bluesky URL"}
+            
+        text = state["text"]
         
         try:
-            response = await self.llm.generate_content(prompt)
+            # Generate tweets using LLM
+            tweets = await self.llm.generate_tweets(text)
             
-            # Parse the response into a list of tweet objects
-            tweets = []
-            try:
-                # Remove markdown code block markers if present
-                response = response.strip('```json\n').strip('```')
-                # Remove any numbering or additional text
-                response = response.split('\n')
-                response = [line for line in response if line.strip() and not line.strip().startswith(('1.', '2.', '3.', '4.', '5.', '6.'))]
-                response = '\n'.join(response)
-                
-                # Parse the JSON array
-                tweet_list = json.loads(response)
-                if not isinstance(tweet_list, list):
-                    tweet_list = [tweet_list]
-                
-                for i, tweet in enumerate(tweet_list):
-                    if isinstance(tweet, dict):
-                        # Handle nested text object
-                        tweet_text = tweet.get('text', '')
-                        if isinstance(tweet_text, dict):
-                            tweet_text = tweet_text.get('text', '')
-                            
-                        # Handle nested hashtags
-                        hashtags = tweet.get('hashtags', ["#blockchain", "#crypto"])
-                        if isinstance(hashtags, dict):
-                            hashtags = hashtags.get('hashtags', ["#blockchain", "#crypto"])
-                        
-                        # Create a properly formatted tweet object
-                        formatted_tweet = {
-                            "index": i + 1,
-                            "text": tweet_text,
-                            "hashtags": hashtags,
-                            "gen_ts": self.now()
-                        }
-                        tweets.append(formatted_tweet)
-            except json.JSONDecodeError as e:
-                # If not JSON, split by newlines and create tweet objects
-                for i, line in enumerate(response.split('\n')):
-                    if line.strip():
-                        tweets.append({
-                            "index": i + 1,
-                            "text": line.strip(),
-                            "hashtags": ["#blockchain", "#crypto"],
-                            "gen_ts": self.now()
-                        })
+            # Update Sheet1
+            sheet = self.sheets.sheet.worksheet("Sheet1")
+            headers = sheet.row_values(1)
+            col_indices = {col: headers.index(col) + 1 for col in headers}
             
-            if not tweets:
-                error_msg = "No tweets generated"
-                raise Exception(error_msg)
-                
-            # Update the Google Sheet with the generated tweets
-            self.sheets.update_row(current_row['id'], {
-                "generate_ts": self.now(),
-                "retry_count_generate": "0",
-                "tweets": json.dumps(tweets)  # Store as properly formatted JSON string
-            })
+            sheet.update_cell(current_row['id'], col_indices['generate_ts'], self.now())
+            sheet.update_cell(current_row['id'], col_indices['retry_count_generate'], "0")
+            sheet.update_cell(current_row['id'], col_indices['tweets'], json.dumps(tweets))
             
             return {**state, "tweets": tweets}
         except Exception as e:
             error_msg = f"Error generating tweets: {str(e)}"
-            # Safely handle retry count
+            sheet = self.sheets.sheet.worksheet("Sheet1")
+            headers = sheet.row_values(1)
+            col_indices = {col: headers.index(col) + 1 for col in headers}
+            
             retry_count = current_row.get('retry_count_generate', '0')
             try:
                 current_retry = int(retry_count) if retry_count else 0
             except ValueError:
                 current_retry = 0
                 
-            self.sheets.update_row(current_row['id'], {
-                "status": "error",
-                "retry_count_generate": str(current_retry + 1),
-                "generate_ts": self.now()
-            })
+            sheet.update_cell(current_row['id'], col_indices['status'], "error")
+            sheet.update_cell(current_row['id'], col_indices['retry_count_generate'], str(current_retry + 1))
+            sheet.update_cell(current_row['id'], col_indices['generate_ts'], self.now())
+            
             return {**state, "error": error_msg}
 
     async def store_tweets_node(self, state):
@@ -275,55 +283,38 @@ Do not include any numbering or additional text. Return only the JSON array."""
             return {**state, "error": error_msg}
             
         current_row = state["current_row"]
+        if current_row.get('sheet') != 'Sheet1':
+            # Skip if not from Sheet1
+            return {**state, "skipped": True, "reason": "Not a Twitter/Bluesky URL"}
+            
         tweets = state["tweets"]
         
         try:
-            processed_tweets = []
-            for tweet in tweets:
-                # Handle nested text object
-                tweet_text = tweet.get('text', '')
-                if isinstance(tweet_text, dict):
-                    tweet_text = tweet_text.get('text', '')
-                    
-                # Handle nested hashtags
-                hashtags = tweet.get('hashtags', ["#blockchain", "#crypto"])
-                if isinstance(hashtags, dict):
-                    hashtags = hashtags.get('hashtags', ["#blockchain", "#crypto"])
-                
-                # Create properly formatted tweet
-                processed_tweet = {
-                    "index": tweet.get('index', len(processed_tweets) + 1),
-                    "text": tweet_text,
-                    "hashtags": hashtags,
-                    "gen_ts": tweet.get('gen_ts', self.now())
-                }
-                processed_tweets.append(processed_tweet)
+            # Store tweets in Sheet1
+            sheet = self.sheets.sheet.worksheet("Sheet1")
+            headers = sheet.row_values(1)
+            col_indices = {col: headers.index(col) + 1 for col in headers}
             
-            # Store the processed tweets
-            self.tweet_storer.store_llm_tweets(current_row['id'], processed_tweets)
+            sheet.update_cell(current_row['id'], col_indices['store_ts'], self.now())
+            sheet.update_cell(current_row['id'], col_indices['retry_count_store'], "0")
             
-            # Update the Google Sheet with the processed tweets
-            self.sheets.update_row(current_row['id'], {
-                "store_ts": self.now(),
-                "retry_count_store": "0",
-                "tweets": json.dumps(processed_tweets)
-            })
-            
-            return {**state, "stored": True, "tweets": processed_tweets}
+            return {**state, "stored": True}
         except Exception as e:
             error_msg = f"Error storing tweets: {str(e)}"
-            # Safely handle retry count
+            sheet = self.sheets.sheet.worksheet("Sheet1")
+            headers = sheet.row_values(1)
+            col_indices = {col: headers.index(col) + 1 for col in headers}
+            
             retry_count = current_row.get('retry_count_store', '0')
             try:
                 current_retry = int(retry_count) if retry_count else 0
             except ValueError:
                 current_retry = 0
                 
-            self.sheets.update_row(current_row['id'], {
-                "status": "error",
-                "retry_count_store": str(current_retry + 1),
-                "store_ts": self.now()
-            })
+            sheet.update_cell(current_row['id'], col_indices['status'], "error")
+            sheet.update_cell(current_row['id'], col_indices['retry_count_store'], str(current_retry + 1))
+            sheet.update_cell(current_row['id'], col_indices['store_ts'], self.now())
+            
             return {**state, "error": error_msg}
 
     async def post_to_twitter_node(self, state):
@@ -335,6 +326,10 @@ Do not include any numbering or additional text. Return only the JSON array."""
             return {**state, "error": error_msg}
             
         current_row = state["current_row"]
+        if current_row.get('sheet') != 'Sheet1':
+            # Skip if not from Sheet1
+            return {**state, "skipped": True, "reason": "Not a Twitter/Bluesky URL"}
+            
         tweets = state["tweets"]
         
         try:
@@ -342,28 +337,30 @@ Do not include any numbering or additional text. Return only the JSON array."""
             for tweet in tweets:
                 await self.twitter.post_tweet(tweet['text'])
                 
-            # Update the Google Sheet
-            self.sheets.update_row(current_row['id'], {
-                "post_ts": self.now(),
-                "retry_count_post": "0",
-                "status": "in_progress"
-            })
+            # Update Sheet1
+            sheet = self.sheets.sheet.worksheet("Sheet1")
+            headers = sheet.row_values(1)
+            col_indices = {col: headers.index(col) + 1 for col in headers}
+            
+            sheet.update_cell(current_row['id'], col_indices['twitter_result'], "success")
+            sheet.update_cell(current_row['id'], col_indices['retry_count_post_twitter'], "0")
             
             return {**state, "posted": True}
         except Exception as e:
             error_msg = f"Error posting tweets: {str(e)}"
-            # Safely handle retry count
-            retry_count = current_row.get('retry_count_post', '0')
+            sheet = self.sheets.sheet.worksheet("Sheet1")
+            headers = sheet.row_values(1)
+            col_indices = {col: headers.index(col) + 1 for col in headers}
+            
+            retry_count = current_row.get('retry_count_post_twitter', '0')
             try:
                 current_retry = int(retry_count) if retry_count else 0
             except ValueError:
                 current_retry = 0
                 
-            self.sheets.update_row(current_row['id'], {
-                "status": "error",
-                "retry_count_post": str(current_retry + 1),
-                "post_ts": self.now()
-            })
+            sheet.update_cell(current_row['id'], col_indices['twitter_result'], "error")
+            sheet.update_cell(current_row['id'], col_indices['retry_count_post_twitter'], str(current_retry + 1))
+            
             return {**state, "error": error_msg}
 
     async def post_to_bsky_node(self, state):
@@ -375,6 +372,10 @@ Do not include any numbering or additional text. Return only the JSON array."""
             return {**state, "error": error_msg}
             
         current_row = state["current_row"]
+        if current_row.get('sheet') != 'Sheet1':
+            # Skip if not from Sheet1
+            return {**state, "skipped": True, "reason": "Not a Twitter/Bluesky URL"}
+            
         tweets = state["tweets"]
         
         try:
@@ -382,27 +383,30 @@ Do not include any numbering or additional text. Return only the JSON array."""
             for tweet in tweets:
                 await self.bsky.create_post(tweet['text'])
                 
-            # Update the Google Sheet
-            self.sheets.update_row(current_row['id'], {
-                "bsky_ts": self.now(),
-                "retry_count_bsky": "0",
-                "status": "in_progress"
-            })
+            # Update Sheet1
+            sheet = self.sheets.sheet.worksheet("Sheet1")
+            headers = sheet.row_values(1)
+            col_indices = {col: headers.index(col) + 1 for col in headers}
+            
+            sheet.update_cell(current_row['id'], col_indices['bsky_result'], "success")
+            sheet.update_cell(current_row['id'], col_indices['retry_count_post_bsky'], "0")
+            
             return {**state, "posted_to_bsky": True}
         except Exception as e:
             error_msg = f"Error posting to Bluesky: {str(e)}"
-            # Safely handle retry count
-            retry_count = current_row.get('retry_count_bsky', '0')
+            sheet = self.sheets.sheet.worksheet("Sheet1")
+            headers = sheet.row_values(1)
+            col_indices = {col: headers.index(col) + 1 for col in headers}
+            
+            retry_count = current_row.get('retry_count_post_bsky', '0')
             try:
                 current_retry = int(retry_count) if retry_count else 0
             except ValueError:
                 current_retry = 0
                 
-            self.sheets.update_row(current_row['id'], {
-                "status": "error",
-                "retry_count_bsky": str(current_retry + 1),
-                "bsky_ts": self.now()
-            })
+            sheet.update_cell(current_row['id'], col_indices['bsky_result'], "error")
+            sheet.update_cell(current_row['id'], col_indices['retry_count_post_bsky'], str(current_retry + 1))
+            
             return {**state, "error": error_msg}
 
     async def engage_posts_node(self, state):
@@ -498,41 +502,58 @@ Do not include any numbering or additional text. Return only the JSON array."""
             return {**state, "error": error_msg}
             
         current_row = state["current_row"]
+        if current_row.get('sheet') != 'Sheet2':
+            # Skip if not from Sheet2
+            return {**state, "skipped": True, "reason": "Not a Telegram URL"}
+            
         text = state["text"]
         
         try:
+            # Get Sheet2
+            sheet2 = self.sheets.sheet.worksheet("Sheet2")
+            
+            # Get headers and verify required columns
+            headers = sheet2.row_values(1)
+            required_columns = ['status', 'error', 'update_ts']
+            missing_columns = [col for col in required_columns if col not in headers]
+            
+            if missing_columns:
+                logger.error(f"Missing required columns in Sheet2: {missing_columns}")
+                return {**state, "error": f"Missing required columns: {missing_columns}"}
+            
+            # Get column indices
+            col_indices = {col: headers.index(col) + 1 for col in headers}
+            
             # Format content for Telegram
             content = {
-                'title': current_row.get('title', 'New Post'),
+                'title': 'New Post',
                 'content': text,
                 'url': current_row.get('url', '')
             }
             
-            # Post to Telegram
-            result = self.telegram.process_and_post(limit=1)
+            # Format message for Telegram
+            message = self.telegram.format_telegram_message(content)
+            if not message:
+                raise Exception("Failed to format message for Telegram")
             
-            # Update the Google Sheet
-            self.sheets.update_row(current_row['id'], {
-                "telegram_ts": self.now(),
-                "retry_count_telegram": "0",
-                "status": "in_progress"
-            })
+            # Post to Telegram
+            success = self.telegram.post_to_telegram(message)
+            if not success:
+                raise Exception("Failed to post to Telegram")
+            
+            # Update the Google Sheet in Sheet2
+            sheet2.update_cell(current_row['id'], col_indices['status'], "complete")
+            sheet2.update_cell(current_row['id'], col_indices['update_ts'], self.now())
             
             return {**state, "posted_to_telegram": True}
         except Exception as e:
             error_msg = f"Error posting to Telegram: {str(e)}"
-            # Safely handle retry count
-            retry_count = current_row.get('retry_count_telegram', '0')
-            try:
-                current_retry = int(retry_count) if retry_count else 0
-            except ValueError:
-                current_retry = 0
-                
-            self.sheets.update_row(current_row['id'], {
-                "status": "error",
-                "retry_count_telegram": str(current_retry + 1),
-                "telegram_ts": self.now()
-            })
+            
+            # Update error status in Sheet2
+            sheet2.update_cell(current_row['id'], col_indices['status'], "error")
+            sheet2.update_cell(current_row['id'], col_indices['error'], error_msg)
+            sheet2.update_cell(current_row['id'], col_indices['update_ts'], self.now())
+            
             return {**state, "error": error_msg}
 
     def completion_node(self, state):
