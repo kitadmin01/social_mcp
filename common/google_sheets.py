@@ -89,48 +89,52 @@ class GoogleSheetsClient:
             logger.error(f"Error getting pending URLs: {str(e)}")
             return []
 
-    def update_row(self, row_id: int, updates: Dict[str, Any]):
-        """Update specific columns in a row.
-        
-        Args:
-            row_id (int): The row number to update (1-based index)
-            updates (Dict[str, Any]): Dictionary of column names and values to update
-        """
+    def update_row(self, sheet_name: str, row_index: int, updates: Dict[str, Any]) -> None:
+        """Update specific cells in a row."""
         try:
-            # Get the header row to find column indices
-            headers = self.worksheet.row_values(1)
+            # Get the worksheet
+            worksheet = self.sheet.worksheet(sheet_name)
+            if not worksheet:
+                logger.error(f"Worksheet {sheet_name} not found")
+                return
+
+            # Get the header row to map column names to indices
+            headers = worksheet.row_values(1)
             
-            # Update each column
-            for col, value in updates.items():
-                if col in headers:
-                    col_idx = headers.index(col) + 1  # Convert to 1-based index
-                    self.worksheet.update_cell(row_id, col_idx, str(value))
+            # Get the sno value for logging
+            sno_col_index = headers.index('sno') + 1 if 'sno' in headers else None
+            sno_value = worksheet.cell(row_index + 1, sno_col_index).value if sno_col_index else 'N/A'
+            
+            # Update each specified cell
+            for col_name, value in updates.items():
+                if col_name in headers:
+                    col_index = headers.index(col_name) + 1  # +1 because sheets is 1-indexed
+                    worksheet.update_cell(row_index + 1, col_index, value)
+                    logger.info(f"Updated {sheet_name} - Row {sno_value} with field {col_name}: {value}")
                 else:
-                    logger.warning(f"Column '{col}' not found in headers")
+                    logger.warning(f"Column {col_name} not found in {sheet_name}")
             
-            # Always update last_update_ts
-            if 'last_update_ts' in headers:
-                last_update_idx = headers.index('last_update_ts') + 1
-                self.worksheet.update_cell(row_id, last_update_idx, datetime.utcnow().isoformat())
-            
-            logger.info(f"Updated row {row_id} with {len(updates)} fields")
+            logger.info(f"Updated {sheet_name} - Row {sno_value} with {len(updates)} fields")
             
         except Exception as e:
-            logger.error(f"Error updating row {row_id}: {str(e)}")
+            logger.error(f"Error updating row in {sheet_name}: {str(e)}")
             raise
 
-    def store_tweets(self, row_id: int, tweets: Any):
-        self.update_row(row_id, {
+    def store_tweets(self, sheet_name: str, row_index: int, tweets: Any):
+        """Store generated tweets in the sheet."""
+        self.update_row(sheet_name, row_index, {
             'tweets': str(tweets),
             'store_ts': datetime.utcnow().isoformat(),
             'status': 'tweets_stored'
         })
 
-    def store_result(self, row_id: int, platform: str, result: str):
+    def store_result(self, sheet_name: str, row_index: int, platform: str, result: str):
+        """Store platform-specific result in the sheet."""
         col = f'{platform.lower()}_result'
         if col in COLUMNS:
-            self.update_row(row_id, {col: result})
+            self.update_row(sheet_name, row_index, {col: result})
 
-    def update_status(self, row_id: int, status: str):
-        self.update_row(row_id, {'status': status})
+    def update_status(self, sheet_name: str, row_index: int, status: str):
+        """Update the status of a row."""
+        self.update_row(sheet_name, row_index, {'status': status})
  

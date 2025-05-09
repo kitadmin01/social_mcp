@@ -96,17 +96,33 @@ class WorkflowGraph:
             records1 = sheet1.get_all_records()
             pending_urls1 = []
             
-            # Find rows where status is empty and url is not empty
+            # Find rows where status is empty or "pending" and url is not empty
             for i, record in enumerate(records1, start=2):
-                if not record.get('status') and record.get('url'):
+                status = record.get('status', '').lower()
+                if (not status or status == 'pending') and record.get('url'):
                     pending_urls1.append({
                         'id': i,
                         'url': record['url'],
                         'status': 'in_progress',
                         'sheet': 'Sheet1'
                     })
+                    logger.info(f"Found pending URL in Sheet1: {record['url']}")
             
-            # Get Sheet2 for Telegram content
+            # If we have pending URLs in Sheet1, process them
+            if pending_urls1:
+                # Take only the first M URLs
+                valid_rows = pending_urls1[:self.M]
+                logger.info(f"Processing {len(valid_rows)} URLs from Sheet1")
+                
+                # Update status for selected rows
+                for row in valid_rows:
+                    sheet1.update_cell(row['id'], col_indices1['status'], "in_progress")
+                    sheet1.update_cell(row['id'], col_indices1['processing_ts'], self.now())
+                    logger.info(f"Updated status to in_progress for row {row['id']} in Sheet1")
+                
+                return {"rows": valid_rows, "current_row": None, "text": None, "tweets": None, "engagement_only": False}
+            
+            # If no pending URLs in Sheet1, check Sheet2
             sheet2 = self.sheets.sheet.worksheet("Sheet2")
             if not sheet2:
                 logger.error("Sheet2 not found")
@@ -137,25 +153,26 @@ class WorkflowGraph:
                         'status': 'in_progress',
                         'sheet': 'Sheet2'
                     })
+                    logger.info(f"Found pending URL in Sheet2: {record['tele_urls']}")
             
-            # Combine and take only the first M URLs
-            all_pending = pending_urls1 + pending_urls2
-            valid_rows = all_pending[:self.M]
-            
-            if not valid_rows:
-                logger.info("No valid rows found to process, continuing with engagement")
-                return {"rows": [], "current_row": None, "text": None, "tweets": None, "engagement_only": True}
-            
-            # Update status for selected rows
-            for row in valid_rows:
-                if row['sheet'] == 'Sheet1':
-                    sheet1.update_cell(row['id'], col_indices1['status'], "in_progress")
-                    sheet1.update_cell(row['id'], col_indices1['processing_ts'], self.now())
-                else:  # Sheet2
+            # If we have pending URLs in Sheet2, process them
+            if pending_urls2:
+                # Take only the first M URLs
+                valid_rows = pending_urls2[:self.M]
+                logger.info(f"Processing {len(valid_rows)} URLs from Sheet2")
+                
+                # Update status for selected rows
+                for row in valid_rows:
                     sheet2.update_cell(row['id'], col_indices2['status'], "in_progress")
                     sheet2.update_cell(row['id'], col_indices2['update_ts'], self.now())
+                    logger.info(f"Updated status to in_progress for row {row['id']} in Sheet2")
                 
-            return {"rows": valid_rows, "current_row": None, "text": None, "tweets": None, "engagement_only": False}
+                return {"rows": valid_rows, "current_row": None, "text": None, "tweets": None, "engagement_only": False}
+            
+            # If no pending URLs in either sheet, continue with engagement
+            logger.info("No valid rows found to process, continuing with engagement")
+            return {"rows": [], "current_row": None, "text": None, "tweets": None, "engagement_only": True}
+            
         except Exception as e:
             logger.error(f"Error in batch_retrieval: {str(e)}")
             return {"error": str(e)}
@@ -244,7 +261,64 @@ class WorkflowGraph:
         
         try:
             # Generate tweets using LLM
-            tweets = await self.llm.generate_tweets(text)
+            prompt = f"""Based on the following content, generate 3 engaging tweets about blockchain/crypto. 
+            Each tweet should be unique, informative, and include relevant hashtags.
+            Format the response as a JSON array of objects with 'text' field.
+            Content: {text}"""
+            
+            response = await self.llm.generate_content(prompt)
+            if not response:
+                raise Exception("No response from LLM")
+                
+            # Parse the response to get tweets
+            try:
+                # Remove markdown code block if present
+                if response.startswith('```json'):
+                    response = response[7:]
+                if response.endswith('```'):
+                    response = response[:-3]
+                response = response.strip()
+                
+                # Parse JSON
+                raw_tweets = json.loads(response)
+                if not isinstance(raw_tweets, list):
+                    raw_tweets = [{"text": response}]
+                
+                # Format tweets according to required structure
+                now = datetime.utcnow().isoformat()
+                formatted_tweets = []
+                
+                for i, tweet in enumerate(raw_tweets, 1):
+                    # Extract hashtags from the tweet text
+                    hashtags = []
+                    words = tweet['text'].split()
+                    for word in words:
+                        if word.startswith('#'):
+                            hashtags.append(word[1:])  # Remove # symbol
+                    
+                    formatted_tweet = {
+                        "index": i,
+                        "text": tweet['text'],
+                        "hashtags": hashtags,
+                        "gen_ts": now
+                    }
+                    formatted_tweets.append(formatted_tweet)
+                
+            except json.JSONDecodeError:
+                # If response is not valid JSON, create a single tweet
+                now = datetime.utcnow().isoformat()
+                hashtags = []
+                words = response.split()
+                for word in words:
+                    if word.startswith('#'):
+                        hashtags.append(word[1:])
+                
+                formatted_tweets = [{
+                    "index": 1,
+                    "text": response,
+                    "hashtags": hashtags,
+                    "gen_ts": now
+                }]
             
             # Update Sheet1
             sheet = self.sheets.sheet.worksheet("Sheet1")
@@ -252,10 +326,9 @@ class WorkflowGraph:
             col_indices = {col: headers.index(col) + 1 for col in headers}
             
             sheet.update_cell(current_row['id'], col_indices['generate_ts'], self.now())
-            sheet.update_cell(current_row['id'], col_indices['retry_count_generate'], "0")
-            sheet.update_cell(current_row['id'], col_indices['tweets'], json.dumps(tweets))
+            sheet.update_cell(current_row['id'], col_indices['tweets'], json.dumps(formatted_tweets))
             
-            return {**state, "tweets": tweets}
+            return {**state, "tweets": formatted_tweets}
         except Exception as e:
             error_msg = f"Error generating tweets: {str(e)}"
             sheet = self.sheets.sheet.worksheet("Sheet1")
@@ -295,8 +368,9 @@ class WorkflowGraph:
             headers = sheet.row_values(1)
             col_indices = {col: headers.index(col) + 1 for col in headers}
             
+            # Update timestamps and status
             sheet.update_cell(current_row['id'], col_indices['store_ts'], self.now())
-            sheet.update_cell(current_row['id'], col_indices['retry_count_store'], "0")
+            sheet.update_cell(current_row['id'], col_indices['tweets'], json.dumps(tweets))
             
             return {**state, "stored": True}
         except Exception as e:
@@ -305,14 +379,8 @@ class WorkflowGraph:
             headers = sheet.row_values(1)
             col_indices = {col: headers.index(col) + 1 for col in headers}
             
-            retry_count = current_row.get('retry_count_store', '0')
-            try:
-                current_retry = int(retry_count) if retry_count else 0
-            except ValueError:
-                current_retry = 0
-                
+            # Update error status
             sheet.update_cell(current_row['id'], col_indices['status'], "error")
-            sheet.update_cell(current_row['id'], col_indices['retry_count_store'], str(current_retry + 1))
             sheet.update_cell(current_row['id'], col_indices['store_ts'], self.now())
             
             return {**state, "error": error_msg}
@@ -556,16 +624,30 @@ class WorkflowGraph:
             
             return {**state, "error": error_msg}
 
-    def completion_node(self, state):
-        if not state.get('current_row'):
-            # logger.info("No current row to complete")
+    async def completion_node(self, state: Dict) -> Dict:
+        """Handle workflow completion."""
+        try:
+            current_row = state.get('current_row')
+            if not current_row:
+                logger.warning("No current row to complete")
+                return {"end": True}
+                
+            row_id = current_row.get('id')
+            sheet_name = current_row.get('sheet', 'Sheet1')
+            status = "complete" if not state.get('error') else "error"
+            
+            # Update the row with completion status
+            self.sheets.update_row(sheet_name, row_id, {
+                "status": status,
+                "last_update_ts": self.now()
+            })
+            
+            logger.info(f"Workflow completed for {sheet_name} - Row {row_id} with status: {status}")
             return {"end": True}
             
-        row_id = state['current_row']['id']
-        status = "complete" if not state.get('error') else "error"
-        self.sheets.update_row(row_id, {"status": status, "last_update_ts": self.now()})
-        # logger.info(f"Workflow completed with result: {state}")
-        return {"end": True}
+        except Exception as e:
+            logger.error(f"Error in completion node: {str(e)}")
+            return {"end": True, "error": str(e)}
 
     def get_status(self) -> Dict[str, Any]:
         """Get current status of all platforms.

@@ -118,15 +118,16 @@ social_mcp/
 4. Set up Google Sheets API and OAuth credentials
 
 ## Usage
-1. Start the MCP server:
+1. Start the MCP server from /social_mcp:
    ```bash
    python mcp_server/server.py
    ```
 
-2. Run the MCP client:
+2. Run the MCP client from /social_mcp:
    ```bash
    python mcp_client/client.py
    ```
+
 
 ## Adding New Features
 - **New Tools**: Add to `mcp_server/tools/` and register in `server.py`
@@ -155,3 +156,8 @@ social_mcp/
    - Verify login state
    - Handle session recovery
    - Clean up resources properly 
+
+
+** To do
+1. Get content from tweet and bsky, use LLM to get response and post it
+2. Incorporate second twitter account to post and like
