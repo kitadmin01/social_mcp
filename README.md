@@ -161,3 +161,6 @@ social_mcp/
 ** To do
 1. Get content from tweet and bsky, use LLM to get response and post it
 2. Incorporate second twitter account to post and like
+3. For search and engagement include searches "web3", "nft", 'crypto"
+4. Timing the workflow starts and runs make it random from .env
+5. Implement Reddit posting

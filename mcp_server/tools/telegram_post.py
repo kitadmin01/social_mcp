@@ -92,7 +92,7 @@ class TelegramPoster:
                 
                 # Verify required columns exist
                 headers = self.sheet.row_values(1)
-                required_columns = ['tele_urls', 'status', 'error', 'update_ts']
+                required_columns = ['tele_urls', 'status', 'error', 'last_update_ts']
                 missing_columns = [col for col in required_columns if col.lower() not in [h.lower() for h in headers]]
                 
                 if missing_columns:
@@ -216,7 +216,7 @@ class TelegramPoster:
                 self.sheet.update_cell(row, self.sheet.find('error').col, error)
             
             # Update timestamp
-            self.sheet.update_cell(row, self.sheet.find('update_ts').col, 
+            self.sheet.update_cell(row, self.sheet.find('last_update_ts').col, 
                                  datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
             
             logger.info(f"Updated sheet row {row} with status: {status}")

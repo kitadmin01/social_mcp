@@ -21,26 +21,65 @@ class BlueskyAPI:
         logger.info("BlueskyAPI initialized")
 
     async def _ensure_session(self):
-        """Ensure we have an active session and access token."""
-        if self.session is None:
-            self.session = aiohttp.ClientSession()
-        if self.access_jwt is None:
-            self.access_jwt = await self._login()
-            self.session.headers.update({'Authorization': f'Bearer {self.access_jwt}'})
-
-    async def _login(self) -> str:
-        """Login to Bluesky and get access token."""
+        """Ensure we have a valid session, refresh if needed."""
         try:
-            url = 'https://bsky.social/xrpc/com.atproto.server.createSession'
-            payload = {"identifier": self.api_key, "password": self.api_password}
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload) as resp:
-                    resp.raise_for_status()
-                    data = await resp.json()
-                    logger.info("Successfully logged in to Bluesky")
-                    return data['accessJwt']
+            if not self.session:
+                self.session = aiohttp.ClientSession()
+            
+            # Check if session is valid by making a test request
+            try:
+                test_url = 'https://bsky.social/xrpc/com.atproto.server.getSession'
+                async with self.session.get(test_url) as resp:
+                    if resp.status == 401 or resp.status == 403:
+                        logger.warning("Session expired, refreshing...")
+                        await self._refresh_session()
+                    elif resp.status != 200:
+                        logger.warning(f"Session check failed with status {resp.status}, refreshing...")
+                        await self._refresh_session()
+            except Exception as e:
+                logger.warning(f"Session check failed: {str(e)}, refreshing...")
+                await self._refresh_session()
+                
         except Exception as e:
-            logger.error(f"Failed to login to Bluesky: {str(e)}")
+            logger.error(f"Error ensuring session: {str(e)}")
+            raise
+
+    async def _refresh_session(self):
+        """Refresh the Bluesky session."""
+        try:
+            logger.info("Refreshing Bluesky session...")
+            
+            # Close existing session if any
+            if self.session:
+                await self.session.close()
+            
+            # Create new session
+            self.session = aiohttp.ClientSession()
+            
+            # Re-authenticate
+            url = 'https://bsky.social/xrpc/com.atproto.server.createSession'
+            payload = {
+                "identifier": self.api_key,
+                "password": self.api_password
+            }
+            
+            async with self.session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    raise Exception(f"Authentication failed: {error_text}")
+                
+                data = await resp.json()
+                self.access_jwt = data.get('accessJwt')
+                
+                # Update session headers
+                self.session.headers.update({
+                    'Authorization': f'Bearer {self.access_jwt}'
+                })
+                
+            logger.info("Successfully refreshed Bluesky session")
+            
+        except Exception as e:
+            logger.error(f"Error refreshing session: {str(e)}")
             raise
 
     async def create_post(self, text: str, repo: Optional[str] = None) -> dict:
@@ -185,28 +224,41 @@ class BlueskyAPI:
         """
         try:
             await self._ensure_session()
-            url = 'https://bsky.social/xrpc/app.bsky.feed.searchPosts'
-            params = {
-                'q': '#blockchain',
-                'limit': limit
-            }
             
-            logger.info(f"Searching for blockchain posts (limit: {limit})")
-            async with self.session.get(url, params=params) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
-                posts = data.get('posts', [])
-                logger.info(f"Found {len(posts)} blockchain posts")
-                return posts
+            # Try multiple search terms if the first one fails
+            search_terms = ['#blockchain', 'blockchain', 'crypto', 'web3']
             
-        except aiohttp.ClientResponseError as e:
-            logger.error(f"Error searching posts: {str(e)}")
-            if e.status == 403:
-                logger.error("Authentication failed. Please check your API credentials.")
-            raise
+            for term in search_terms:
+                try:
+                    url = 'https://bsky.social/xrpc/app.bsky.feed.searchPosts'
+                    params = {
+                        'q': term,
+                        'limit': limit
+                    }
+                    
+                    logger.info(f"Searching for posts with term: {term}")
+                    async with self.session.get(url, params=params) as resp:
+                        if resp.status == 400:
+                            logger.warning(f"Search failed for term {term}, trying next term...")
+                            continue
+                            
+                        resp.raise_for_status()
+                        data = await resp.json()
+                        posts = data.get('posts', [])
+                        
+                        if posts:
+                            logger.info(f"Found {len(posts)} posts with term {term}")
+                            return posts
+                except Exception as e:
+                    logger.warning(f"Error searching with term {term}: {str(e)}")
+                    continue
+            
+            logger.warning("No posts found with any search term")
+            return []
+            
         except Exception as e:
-            logger.error(f"Unexpected error searching posts: {str(e)}")
-            raise
+            logger.error(f"Error in search_blockchain_posts: {str(e)}")
+            return []
 
     async def like_post(self, uri: str, cid: str, repo: Optional[str] = None) -> dict:
         """Like a post on Bluesky.
@@ -268,6 +320,10 @@ class BlueskyAPI:
             logger.info(f"Searching for blockchain posts to like (count: {like_count})...")
             posts = await self.search_blockchain_posts(limit=like_count)
             
+            if not posts:
+                logger.warning("No posts found to like")
+                return []
+            
             results = []
             for i, post in enumerate(posts, 1):
                 try:
@@ -275,6 +331,11 @@ class BlueskyAPI:
                     cid = post.get('cid')
                     if not uri or not cid:
                         logger.warning(f"Post {i} missing URI or CID, skipping")
+                        continue
+                    
+                    # Check if we've already liked this post
+                    if await self._check_if_liked(uri):
+                        logger.info(f"Post {i} already liked, skipping")
                         continue
                         
                     logger.info(f"Liking post {i}/{len(posts)}: {uri}")
@@ -293,7 +354,24 @@ class BlueskyAPI:
             
         except Exception as e:
             logger.error(f"Error in search_and_like_blockchain: {str(e)}")
-            raise
+            return []
+
+    async def _check_if_liked(self, uri: str) -> bool:
+        """Check if a post has already been liked."""
+        try:
+            await self._ensure_session()
+            url = 'https://bsky.social/xrpc/app.bsky.feed.getLikes'
+            params = {'uri': uri}
+            
+            async with self.session.get(url, params=params) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    likes = data.get('likes', [])
+                    return any(like.get('actor', {}).get('did') == self.api_key for like in likes)
+                return False
+        except Exception as e:
+            logger.warning(f"Error checking if post was liked: {str(e)}")
+            return False
 
     def post(self, text: str) -> bool:
         """Post a text to Bluesky."""

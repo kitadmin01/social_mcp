@@ -130,7 +130,7 @@ class WorkflowGraph:
                 
             # Get headers and verify required columns for Sheet2
             headers2 = sheet2.row_values(1)
-            required_columns2 = ['tele_urls', 'status', 'error', 'update_ts']
+            required_columns2 = ['tele_urls', 'status', 'error', 'last_update_ts']
             missing_columns2 = [col for col in required_columns2 if col not in headers2]
             
             if missing_columns2:
@@ -164,7 +164,7 @@ class WorkflowGraph:
                 # Update status for selected rows
                 for row in valid_rows:
                     sheet2.update_cell(row['id'], col_indices2['status'], "in_progress")
-                    sheet2.update_cell(row['id'], col_indices2['update_ts'], self.now())
+                    sheet2.update_cell(row['id'], col_indices2['last_update_ts'], self.now())
                     logger.info(f"Updated status to in_progress for row {row['id']} in Sheet2")
                 
                 return {"rows": valid_rows, "current_row": None, "text": None, "tweets": None, "engagement_only": False}
@@ -207,7 +207,7 @@ class WorkflowGraph:
                 sheet = self.sheets.sheet.worksheet("Sheet2")
                 headers = sheet.row_values(1)
                 col_indices = {col: headers.index(col) + 1 for col in headers}
-                sheet.update_cell(row['id'], col_indices['update_ts'], self.now())
+                sheet.update_cell(row['id'], col_indices['last_update_ts'], self.now())
                 
             return {
                 **state,
@@ -235,7 +235,7 @@ class WorkflowGraph:
                 col_indices = {col: headers.index(col) + 1 for col in headers}
                 sheet.update_cell(row['id'], col_indices['status'], "error")
                 sheet.update_cell(row['id'], col_indices['error'], str(e))
-                sheet.update_cell(row['id'], col_indices['update_ts'], self.now())
+                sheet.update_cell(row['id'], col_indices['last_update_ts'], self.now())
                 
             return {
                 **state,
@@ -582,7 +582,7 @@ class WorkflowGraph:
             
             # Get headers and verify required columns
             headers = sheet2.row_values(1)
-            required_columns = ['status', 'error', 'update_ts']
+            required_columns = ['status', 'error', 'last_update_ts']
             missing_columns = [col for col in required_columns if col not in headers]
             
             if missing_columns:
@@ -611,7 +611,7 @@ class WorkflowGraph:
             
             # Update the Google Sheet in Sheet2
             sheet2.update_cell(current_row['id'], col_indices['status'], "complete")
-            sheet2.update_cell(current_row['id'], col_indices['update_ts'], self.now())
+            sheet2.update_cell(current_row['id'], col_indices['last_update_ts'], self.now())
             
             return {**state, "posted_to_telegram": True}
         except Exception as e:
@@ -620,7 +620,7 @@ class WorkflowGraph:
             # Update error status in Sheet2
             sheet2.update_cell(current_row['id'], col_indices['status'], "error")
             sheet2.update_cell(current_row['id'], col_indices['error'], error_msg)
-            sheet2.update_cell(current_row['id'], col_indices['update_ts'], self.now())
+            sheet2.update_cell(current_row['id'], col_indices['last_update_ts'], self.now())
             
             return {**state, "error": error_msg}
 

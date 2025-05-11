@@ -559,7 +559,9 @@ class TwitterPlaywright:
                     # Start liking tweets
                     likes_count = 0
                     scroll_attempts = 0
-                    max_scroll_attempts = 10
+                    max_scroll_attempts = 20  # Increased from 10 to 20
+                    last_height = 0
+                    no_new_content_count = 0
                     
                     while likes_count < max_likes and scroll_attempts < max_scroll_attempts:
                         # Verify we're still on the search page
@@ -574,11 +576,17 @@ class TwitterPlaywright:
                         like_buttons = await self.page.query_selector_all('[data-testid="like"]')
                         logger.info(f"Found {len(like_buttons)} like buttons")
                         
+                        # Process visible like buttons
                         for button in like_buttons:
                             if likes_count >= max_likes:
                                 break
                             
                             try:
+                                # Check if button is in viewport
+                                is_visible = await button.is_visible()
+                                if not is_visible:
+                                    continue
+                                
                                 # Check if already liked
                                 is_liked = await button.evaluate('''(button) => {
                                     const svg = button.querySelector('svg');
@@ -598,10 +606,26 @@ class TwitterPlaywright:
                                 logger.warning(f"Error liking tweet: {str(e)}")
                                 continue
                         
-                        # Scroll for more tweets
-                        await self.page.evaluate('window.scrollBy(0, 1000)')
-                        await self.page.wait_for_timeout(3000)
+                        # Scroll for more tweets with improved logic
+                        current_height = await self.page.evaluate('document.documentElement.scrollHeight')
+                        if current_height == last_height:
+                            no_new_content_count += 1
+                            if no_new_content_count >= 3:  # If no new content after 3 attempts, try a bigger scroll
+                                await self.page.evaluate('window.scrollBy(0, 2000)')
+                                no_new_content_count = 0
+                        else:
+                            no_new_content_count = 0
+                            
+                        # Scroll with variable distance
+                        scroll_distance = 1000 + (scroll_attempts * 200)  # Increase scroll distance with each attempt
+                        await self.page.evaluate(f'window.scrollBy(0, {scroll_distance})')
+                        await self.page.wait_for_timeout(4000)  # Increased wait time for content to load
+                        
+                        last_height = current_height
                         scroll_attempts += 1
+                        
+                        # Log progress
+                        logger.info(f"Scroll attempt {scroll_attempts}/{max_scroll_attempts}, found {likes_count}/{max_likes} likes")
                     
                     if likes_count > 0:
                         logger.info(f"Successfully liked {likes_count} tweets")
