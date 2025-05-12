@@ -32,8 +32,12 @@ load_dotenv()
 class WorkflowGraph:
     def __init__(self, batch_size=5, engage_count=7):
         self.M = batch_size
-        self.HASHTAG = "#blockchain"
         self.ENGAGE_COUNT = engage_count
+        
+        # Get search terms from environment
+        search_terms = os.getenv('SEARCH_TERMS', '#blockchain,#crypto,#web3,#defi,#nft')
+        self.search_terms = [term.strip() for term in search_terms.split(',')]
+        logger.info(f"Initialized with search terms: {self.search_terms}")
         
         # Get credentials path and sheet ID from environment
         credentials_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "google_sheets_credentials.json")
@@ -73,109 +77,107 @@ class WorkflowGraph:
             return False
 
     async def batch_retrieval(self, state):
+        """Retrieve content from URLs in batches.
+        
+        Args:
+            state (dict): The current workflow state
+            
+        Returns:
+            dict: Updated state with rows to process
+        """
         try:
-            # Get Sheet1 for Twitter/Bluesky content
+            # Check Sheet1 first for pending URLs
             sheet1 = self.sheets.sheet.worksheet("Sheet1")
             if not sheet1:
                 logger.error("Sheet1 not found")
-                return {"error": "Sheet1 not found"}
-                
-            # Get headers and verify required columns for Sheet1
-            headers1 = sheet1.row_values(1)
-            required_columns1 = ['url', 'status', 'processing_ts']
-            missing_columns1 = [col for col in required_columns1 if col not in headers1]
+                return {**state, "error": "Sheet1 not found"}
             
-            if missing_columns1:
-                logger.error(f"Missing required columns in Sheet1: {missing_columns1}")
-                return {"error": f"Missing required columns in Sheet1: {missing_columns1}"}
-            
-            # Get column indices for Sheet1
-            col_indices1 = {col: headers1.index(col) + 1 for col in headers1}
-            
-            # Get pending URLs from Sheet1
             records1 = sheet1.get_all_records()
-            pending_urls1 = []
+            pending_rows1 = [i for i, row in enumerate(records1, start=2) 
+                           if not row.get('status') or row.get('status').lower() == 'pending']
             
-            # Find rows where status is empty or "pending" and url is not empty
-            for i, record in enumerate(records1, start=2):
-                status = record.get('status', '').lower()
-                if (not status or status == 'pending') and record.get('url'):
-                    pending_urls1.append({
-                        'id': i,
-                        'url': record['url'],
-                        'status': 'in_progress',
-                        'sheet': 'Sheet1'
-                    })
-                    logger.info(f"Found pending URL in Sheet1: {record['url']}")
-            
-            # If we have pending URLs in Sheet1, process them
-            if pending_urls1:
-                # Take only the first M URLs
-                valid_rows = pending_urls1[:self.M]
-                logger.info(f"Processing {len(valid_rows)} URLs from Sheet1")
+            if pending_rows1:
+                logger.info(f"Found {len(pending_rows1)} pending URLs in Sheet1")
+                # Process up to M URLs from Sheet1
+                rows_to_process = pending_rows1[:self.M]
+                valid_rows = []
                 
-                # Update status for selected rows
-                for row in valid_rows:
-                    sheet1.update_cell(row['id'], col_indices1['status'], "in_progress")
-                    sheet1.update_cell(row['id'], col_indices1['processing_ts'], self.now())
-                    logger.info(f"Updated status to in_progress for row {row['id']} in Sheet1")
+                for row_idx in rows_to_process:
+                    try:
+                        url = records1[row_idx-2].get('url')
+                        if not url:
+                            logger.warning(f"No URL found in row {row_idx}")
+                            continue
+                            
+                        logger.info(f"Processing URL from Sheet1: {url}")
+                        # Update status to in_progress
+                        sheet1.update_cell(row_idx, 3, 'in_progress')
+                        sheet1.update_cell(row_idx, 4, self.now())
+                        
+                        valid_rows.append({
+                            'id': row_idx,
+                            'url': url,
+                            'sheet': 'Sheet1'
+                        })
+                            
+                    except Exception as e:
+                        logger.error(f"Error processing URL in Sheet1 row {row_idx}: {str(e)}")
+                        continue
                 
-                return {"rows": valid_rows, "current_row": None, "text": None, "tweets": None, "engagement_only": False}
-            
+                if valid_rows:
+                    logger.info(f"Returning {len(valid_rows)} rows from Sheet1 for processing")
+                    return {**state, "rows": valid_rows, "engagement_only": False}
+                        
             # If no pending URLs in Sheet1, check Sheet2
             sheet2 = self.sheets.sheet.worksheet("Sheet2")
             if not sheet2:
                 logger.error("Sheet2 not found")
-                return {"error": "Sheet2 not found"}
-                
-            # Get headers and verify required columns for Sheet2
-            headers2 = sheet2.row_values(1)
-            required_columns2 = ['tele_urls', 'status', 'error', 'last_update_ts']
-            missing_columns2 = [col for col in required_columns2 if col not in headers2]
+                return {**state, "error": "Sheet2 not found"}
             
-            if missing_columns2:
-                logger.error(f"Missing required columns in Sheet2: {missing_columns2}")
-                return {"error": f"Missing required columns in Sheet2: {missing_columns2}"}
-            
-            # Get column indices for Sheet2
-            col_indices2 = {col: headers2.index(col) + 1 for col in headers2}
-            
-            # Get pending URLs from Sheet2
             records2 = sheet2.get_all_records()
-            pending_urls2 = []
+            # Only get rows with exactly 'pending' status (case-insensitive)
+            pending_rows2 = [i for i, row in enumerate(records2, start=2) 
+                           if row.get('status', '').lower() == 'pending']
             
-            # Find rows where status is "pending" and tele_urls is not empty
-            for i, record in enumerate(records2, start=2):
-                if record.get('status') == 'pending' and record.get('tele_urls'):
-                    pending_urls2.append({
-                        'id': i,
-                        'url': record['tele_urls'],
-                        'status': 'in_progress',
-                        'sheet': 'Sheet2'
-                    })
-                    logger.info(f"Found pending URL in Sheet2: {record['tele_urls']}")
-            
-            # If we have pending URLs in Sheet2, process them
-            if pending_urls2:
-                # Take only the first M URLs
-                valid_rows = pending_urls2[:self.M]
-                logger.info(f"Processing {len(valid_rows)} URLs from Sheet2")
+            if pending_rows2:
+                logger.info(f"Found {len(pending_rows2)} pending URLs in Sheet2")
+                # Process up to M URLs from Sheet2
+                rows_to_process = pending_rows2[:self.M]
+                valid_rows = []
                 
-                # Update status for selected rows
-                for row in valid_rows:
-                    sheet2.update_cell(row['id'], col_indices2['status'], "in_progress")
-                    sheet2.update_cell(row['id'], col_indices2['last_update_ts'], self.now())
-                    logger.info(f"Updated status to in_progress for row {row['id']} in Sheet2")
+                for row_idx in rows_to_process:
+                    try:
+                        # Use tele_urls instead of url for Sheet2
+                        url = records2[row_idx-2].get('tele_urls')
+                        if not url:
+                            logger.warning(f"No tele_urls found in row {row_idx}")
+                            continue
+                            
+                        logger.info(f"Processing URL from Sheet2: {url}")
+                        # Update status to in_progress
+                        sheet2.update_cell(row_idx, 3, 'in_progress')
+                        sheet2.update_cell(row_idx, 4, self.now())
+                        
+                        valid_rows.append({
+                            'id': row_idx,
+                            'url': url,
+                            'sheet': 'Sheet2'
+                        })
+                            
+                    except Exception as e:
+                        logger.error(f"Error processing URL in Sheet2 row {row_idx}: {str(e)}")
+                        continue
                 
-                return {"rows": valid_rows, "current_row": None, "text": None, "tweets": None, "engagement_only": False}
-            
-            # If no pending URLs in either sheet, continue with engagement
-            logger.info("No valid rows found to process, continuing with engagement")
-            return {"rows": [], "current_row": None, "text": None, "tweets": None, "engagement_only": True}
+                if valid_rows:
+                    logger.info(f"Returning {len(valid_rows)} rows from Sheet2 for processing")
+                    return {**state, "rows": valid_rows, "engagement_only": False}
+                
+            logger.info("No pending URLs found in either sheet, proceeding with engagement only")
+            return {**state, "rows": [], "engagement_only": True}
             
         except Exception as e:
             logger.error(f"Error in batch_retrieval: {str(e)}")
-            return {"error": str(e)}
+            return {**state, "error": str(e)}
 
     async def extract_content_node(self, state):
         if not state.get('rows'):
@@ -477,6 +479,12 @@ class WorkflowGraph:
             
             return {**state, "error": error_msg}
 
+    def get_random_search_term(self):
+        """Get a random search term from the configured list."""
+        if not self.search_terms:
+            return "#blockchain"  # fallback to default
+        return random.choice(self.search_terms)
+
     async def engage_posts_node(self, state):
         if state.get('error'):
             return state
@@ -484,14 +492,18 @@ class WorkflowGraph:
         # Allow engagement even if no tweets were posted
         if state.get('engagement_only') or state.get('posted'):
             try:
-                # Like blockchain tweets
-                logger.info("Engaging with Twitter posts...")
-                await self.twitter.search_and_like_tweets(search_term="#blockchain", max_likes=5)
+                # Get random search term for this engagement cycle
+                search_term = self.get_random_search_term()
+                logger.info(f"Using search term for engagement: {search_term}")
+                
+                # Like tweets with random search term
+                logger.info(f"Engaging with Twitter posts using term: {search_term}")
+                await self.twitter.search_and_like_tweets(search_term=search_term, max_likes=5)
                 logger.info("Twitter engagement completed")
                 
-                # Like blockchain posts on Bluesky
-                logger.info("Engaging with Bluesky posts...")
-                await self.bsky.search_and_like_blockchain(like_count=3)
+                # Like posts on Bluesky with same search term
+                logger.info(f"Engaging with Bluesky posts using term: {search_term}")
+                await self.bsky.search_and_like_blockchain(search_term=search_term, like_count=3)
                 logger.info("Bluesky engagement completed")
                 
                 # Update the Google Sheet if we have a current row
@@ -609,13 +621,15 @@ class WorkflowGraph:
             if not success:
                 raise Exception("Failed to post to Telegram")
             
-            # Update the Google Sheet in Sheet2
+            # Update the Google Sheet in Sheet2 with 'complete' status
             sheet2.update_cell(current_row['id'], col_indices['status'], "complete")
             sheet2.update_cell(current_row['id'], col_indices['last_update_ts'], self.now())
+            logger.info(f"Successfully posted to Telegram and updated status to complete for row {current_row['id']}")
             
             return {**state, "posted_to_telegram": True}
         except Exception as e:
             error_msg = f"Error posting to Telegram: {str(e)}"
+            logger.error(error_msg)
             
             # Update error status in Sheet2
             sheet2.update_cell(current_row['id'], col_indices['status'], "error")

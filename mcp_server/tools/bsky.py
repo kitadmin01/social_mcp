@@ -213,10 +213,11 @@ class BlueskyAPI:
             logger.error(f"Error in post_from_sheets: {str(e)}")
             raise
 
-    async def search_blockchain_posts(self, limit: int = 5) -> list:
-        """Search for blockchain-related posts.
+    async def search_blockchain_posts(self, search_term: str, limit: int = 5) -> list:
+        """Search for posts using the given search term.
         
         Args:
+            search_term (str): The search term to use
             limit (int): Maximum number of posts to return (default: 5)
             
         Returns:
@@ -225,35 +226,33 @@ class BlueskyAPI:
         try:
             await self._ensure_session()
             
-            # Try multiple search terms if the first one fails
-            search_terms = ['#blockchain', 'blockchain', 'crypto', 'web3']
-            
-            for term in search_terms:
-                try:
-                    url = 'https://bsky.social/xrpc/app.bsky.feed.searchPosts'
-                    params = {
-                        'q': term,
-                        'limit': limit
-                    }
-                    
-                    logger.info(f"Searching for posts with term: {term}")
-                    async with self.session.get(url, params=params) as resp:
-                        if resp.status == 400:
-                            logger.warning(f"Search failed for term {term}, trying next term...")
-                            continue
-                            
-                        resp.raise_for_status()
-                        data = await resp.json()
-                        posts = data.get('posts', [])
+            # Try the provided search term first
+            try:
+                url = 'https://bsky.social/xrpc/app.bsky.feed.searchPosts'
+                params = {
+                    'q': search_term,
+                    'limit': limit
+                }
+                
+                logger.info(f"Searching Bluesky for posts with term: {search_term} (limit: {limit})")
+                async with self.session.get(url, params=params) as resp:
+                    if resp.status == 400:
+                        logger.warning(f"Bluesky search failed for term '{search_term}' with status 400")
+                        return []
                         
-                        if posts:
-                            logger.info(f"Found {len(posts)} posts with term {term}")
-                            return posts
-                except Exception as e:
-                    logger.warning(f"Error searching with term {term}: {str(e)}")
-                    continue
+                    resp.raise_for_status()
+                    data = await resp.json()
+                    posts = data.get('posts', [])
+                    
+                    if posts:
+                        logger.info(f"Found {len(posts)} posts on Bluesky with term '{search_term}'")
+                        return posts
+                    else:
+                        logger.warning(f"No posts found on Bluesky with term '{search_term}'")
+            except Exception as e:
+                logger.warning(f"Error searching Bluesky with term '{search_term}': {str(e)}")
+                return []
             
-            logger.warning("No posts found with any search term")
             return []
             
         except Exception as e:
@@ -307,21 +306,22 @@ class BlueskyAPI:
             logger.error(f"Error liking post: {str(e)}")
             raise
 
-    async def search_and_like_blockchain(self, like_count: int = 1) -> list:
-        """Search for blockchain-related posts and like them.
+    async def search_and_like_blockchain(self, search_term: str, like_count: int = 1) -> list:
+        """Search for posts using the given search term and like them.
         
         Args:
+            search_term (str): The search term to use
             like_count (int): Number of posts to like (default: 1)
             
         Returns:
             list: Results of the like operations
         """
         try:
-            logger.info(f"Searching for blockchain posts to like (count: {like_count})...")
-            posts = await self.search_blockchain_posts(limit=like_count)
+            logger.info(f"Starting Bluesky engagement with term: '{search_term}' (target likes: {like_count})")
+            posts = await self.search_blockchain_posts(search_term=search_term, limit=like_count)
             
             if not posts:
-                logger.warning("No posts found to like")
+                logger.warning(f"No posts found to like on Bluesky with term '{search_term}'")
                 return []
             
             results = []
@@ -338,18 +338,18 @@ class BlueskyAPI:
                         logger.info(f"Post {i} already liked, skipping")
                         continue
                         
-                    logger.info(f"Liking post {i}/{len(posts)}: {uri}")
+                    logger.info(f"Liking Bluesky post {i}/{len(posts)}: {uri}")
                     result = await self.like_post(uri, cid)
                     results.append(result)
-                    logger.info(f"Successfully liked post {i}")
+                    logger.info(f"Successfully liked Bluesky post {i}")
                     
                     await asyncio.sleep(1)
                     
                 except Exception as e:
-                    logger.error(f"Failed to like post {i}: {str(e)}")
+                    logger.error(f"Failed to like Bluesky post {i}: {str(e)}")
                     continue
             
-            logger.info(f"Completed liking {len(results)} posts")
+            logger.info(f"Completed Bluesky engagement: liked {len(results)} posts with term '{search_term}'")
             return results
             
         except Exception as e:

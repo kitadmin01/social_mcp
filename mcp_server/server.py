@@ -3,6 +3,7 @@
 import os
 import logging
 import asyncio
+import random
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from mcp_server.tools.extract_content import ExtractContent
@@ -22,6 +23,27 @@ logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
+
+# Get search terms from environment
+search_terms = os.getenv('SEARCH_TERMS', '#blockchain,#crypto,#web3,#defi,#nft')
+SEARCH_TERMS = [term.strip() for term in search_terms.split(',')]
+logger.info(f"Initialized with search terms: {SEARCH_TERMS}")
+
+# Keep track of the last used search term index
+last_search_term_index = -1
+
+def get_next_search_term():
+    """Get the next search term in rotation."""
+    global last_search_term_index
+    
+    if not SEARCH_TERMS:
+        return "#blockchain"  # fallback to default
+        
+    # Move to the next term in the list
+    last_search_term_index = (last_search_term_index + 1) % len(SEARCH_TERMS)
+    term = SEARCH_TERMS[last_search_term_index]
+    logger.info(f"Selected next search term in rotation: {term}")
+    return term
 
 # Global state for cleanup
 active_sessions = set()
@@ -139,9 +161,10 @@ async def post_bsky(text: str) -> str:
 async def engage_twitter(count: int = 5) -> str:
     """Engage with tweets on Twitter."""
     try:
-        logger.info(f"Engaging with {count} tweets on Twitter")
-        await twitter.search_and_like_tweets(search_term="#blockchain", max_likes=count)
-        return f"Engaged with {count} tweets on Twitter"
+        search_term = get_next_search_term()
+        logger.info(f"Engaging with {count} tweets on Twitter using term: {search_term}")
+        await twitter.search_and_like_tweets(search_term=search_term, max_likes=count)
+        return f"Engaged with {count} tweets on Twitter using term: {search_term}"
     except Exception as e:
         logger.error(f"Error engaging with Twitter: {str(e)}")
         raise
@@ -150,9 +173,10 @@ async def engage_twitter(count: int = 5) -> str:
 async def engage_bsky(count: int = 5) -> str:
     """Engage with posts on Bluesky."""
     try:
-        logger.info(f"Engaging with {count} posts on Bluesky")
-        await bsky.search_and_like_blockchain(like_count=count)
-        return f"Engaged with {count} posts on Bluesky"
+        search_term = get_next_search_term()
+        logger.info(f"Engaging with {count} posts on Bluesky using term: {search_term}")
+        await bsky.search_and_like_blockchain(search_term=search_term, like_count=count)
+        return f"Engaged with {count} posts on Bluesky using term: {search_term}"
     except Exception as e:
         logger.error(f"Error engaging with Bluesky: {str(e)}")
         raise
