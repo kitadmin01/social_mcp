@@ -11,6 +11,7 @@ from mcp_server.tools.store_tweets import StoreTweets
 from mcp_server.tools.post_tweets import TwitterPlaywright
 from mcp_server.tools.bsky import BlueskyAPI
 from mcp_server.tools.schedule_post import SchedulePost
+from mcp_server.tools.linkedin import LinkedInAPI
 from common.google_sheets import GoogleSheetsClient
 from common.llm_orchestrator import LLMOrchestrator
 
@@ -68,7 +69,7 @@ def initialize_tools():
         logger.info(f"Using credentials file: {credentials_path}")
         
         # Initialize all tools
-        global sheets, extractor, tweet_storer, twitter, bsky, scheduler, llm
+        global sheets, extractor, tweet_storer, twitter, bsky, scheduler, llm, linkedin
         sheets = GoogleSheetsClient(credentials_path, GOOGLE_SHEET_ID)
         extractor = ExtractContent()
         tweet_storer = StoreTweets(sheets)
@@ -76,6 +77,7 @@ def initialize_tools():
         bsky = BlueskyAPI()
         scheduler = SchedulePost(sheets)
         llm = LLMOrchestrator(provider="openai")
+        linkedin = LinkedInAPI()
         
         logger.info("MCP server initialization completed successfully")
         
@@ -91,6 +93,10 @@ async def cleanup_resources():
         # Cleanup Twitter session
         if hasattr(twitter, 'close_session'):
             await twitter.close_session()
+            
+        # Cleanup LinkedIn session
+        if hasattr(linkedin, 'cleanup'):
+            await linkedin.cleanup()
             
         # Cleanup any other resources
         for session in active_sessions:
@@ -158,6 +164,28 @@ async def post_bsky(text: str) -> str:
         raise
 
 @mcp.tool()
+async def post_linkedin(text: str) -> str:
+    """Post content to LinkedIn."""
+    try:
+        logger.info(f"Posting to LinkedIn: {text[:50]}...")
+        await linkedin.create_post(text)
+        return "posted to linkedin"
+    except Exception as e:
+        logger.error(f"Error posting to LinkedIn: {str(e)}")
+        raise
+
+@mcp.tool()
+async def post_linkedin_from_sheets(sheet_name: str = "Sheet1", max_posts: int = 1) -> str:
+    """Post content from Google Sheets to LinkedIn."""
+    try:
+        logger.info(f"Posting content from {sheet_name} to LinkedIn")
+        results = await linkedin.post_from_sheets(sheet_name=sheet_name, max_posts=max_posts)
+        return f"Posted {len(results)} items to LinkedIn"
+    except Exception as e:
+        logger.error(f"Error posting to LinkedIn from sheets: {str(e)}")
+        raise
+
+@mcp.tool()
 async def engage_twitter(count: int = 5) -> str:
     """Engage with tweets on Twitter."""
     try:
@@ -179,6 +207,17 @@ async def engage_bsky(count: int = 5) -> str:
         return f"Engaged with {count} posts on Bluesky using term: {search_term}"
     except Exception as e:
         logger.error(f"Error engaging with Bluesky: {str(e)}")
+        raise
+
+@mcp.tool()
+async def engage_linkedin(count: int = 5) -> str:
+    """Engage with posts on LinkedIn."""
+    try:
+        logger.info(f"Engaging with {count} posts on LinkedIn")
+        results = await linkedin.search_and_like_posts(like_count=count)
+        return f"Engaged with {len(results)} posts on LinkedIn"
+    except Exception as e:
+        logger.error(f"Error engaging with LinkedIn: {str(e)}")
         raise
 
 @mcp.tool()
