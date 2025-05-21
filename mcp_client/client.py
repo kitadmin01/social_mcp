@@ -49,7 +49,10 @@ def load_config():
             'GOOGLE_SHEET_ID',
             'TELEGRAM_BOT_TOKEN',
             'TELEGRAM_CHANNEL',
-            'WORKFLOW_INTERVAL_MINUTES'
+            'WORKFLOW_INTERVAL_MINUTES',
+            'TWITTER_LIKE_COUNT',
+            'BLUESKY_LIKE_COUNT',
+            'LINKEDIN_LIKE_COUNT'
         ]
         missing_vars = [var for var in required_vars if not os.getenv(var)]
         if missing_vars:
@@ -118,8 +121,9 @@ async def run_workflow():
                                 logger.info("Running Twitter engagement...")
                                 twitter_tool = next((tool for tool in tools if tool.name == "engage_twitter"), None)
                                 if twitter_tool:
-                                    await twitter_tool.ainvoke({"count": 5})
-                                    logger.info("Twitter engagement completed")
+                                    twitter_like_count = int(os.getenv('TWITTER_LIKE_COUNT', '10'))
+                                    await twitter_tool.ainvoke({"count": twitter_like_count})
+                                    logger.info(f"Twitter engagement completed with {twitter_like_count} likes")
                                 else:
                                     logger.error("Twitter engagement tool not found")
                             except Exception as e:
@@ -130,12 +134,26 @@ async def run_workflow():
                                 logger.info("Running Bluesky engagement...")
                                 bsky_tool = next((tool for tool in tools if tool.name == "engage_bsky"), None)
                                 if bsky_tool:
-                                    await bsky_tool.ainvoke({"count": 5})
-                                    logger.info("Bluesky engagement completed")
+                                    bsky_like_count = int(os.getenv('BLUESKY_LIKE_COUNT', '10'))
+                                    await bsky_tool.ainvoke({"count": bsky_like_count})
+                                    logger.info(f"Bluesky engagement completed with {bsky_like_count} likes")
                                 else:
                                     logger.error("Bluesky engagement tool not found")
                             except Exception as e:
                                 logger.error(f"Error in Bluesky engagement: {str(e)}")
+                            
+                            # Run LinkedIn engagement
+                            try:
+                                logger.info("Running LinkedIn engagement...")
+                                linkedin_tool = next((tool for tool in tools if tool.name == "engage_linkedin"), None)
+                                if linkedin_tool:
+                                    linkedin_like_count = int(os.getenv('LINKEDIN_LIKE_COUNT', '5'))
+                                    await linkedin_tool.ainvoke({"count": linkedin_like_count})
+                                    logger.info(f"LinkedIn engagement completed with {linkedin_like_count} likes")
+                                else:
+                                    logger.error("LinkedIn engagement tool not found")
+                            except Exception as e:
+                                logger.error(f"Error in LinkedIn engagement: {str(e)}")
                             
                             result = {"status": "engagement_completed"}
                         
