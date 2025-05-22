@@ -8,3 +8,8 @@ oauth2client==4.1.3
 playwright==1.40.0
 cloudscraper 
 fake-useragent
+mcp
+langchain_mcp_adapters
+langgraph>=0.0.10
+langchain-openai
+aiohttp
