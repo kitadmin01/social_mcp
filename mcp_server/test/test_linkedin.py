@@ -6,7 +6,7 @@ import os
 # Add the project root to Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from mcp_server.tools.linkedin import LinkedInAPI
+from mcp_server.tools.linkedin import LinkedInPoster
 from dotenv import load_dotenv, find_dotenv
 
 # Configure logging to show detailed information
@@ -23,23 +23,27 @@ async def test_linkedin():
         logger.info(f"Loading .env from: {dotenv_path}")
         load_dotenv(dotenv_path)
         
-        # Initialize LinkedInAPI
-        linkedin = LinkedInAPI()
-        logger.info("LinkedInAPI initialized")
+        # Initialize LinkedInPoster
+        linkedin = LinkedInPoster()
+        logger.info("LinkedInPoster initialized")
         
-        # Test parameters
-        like_count = 12  # Number of posts to like
-        search_query = "#blockchain"
-        logger.info(f"Will attempt to like {like_count} posts with query: {search_query}")
+        # Test URL
+        test_url = "https://analytickit.com/future-of-affiliate-marketing-in-the-decentralized-web/"
+        logger.info(f"Testing with URL: {test_url}")
         
-        # Attempt to search and like posts
-        logger.info("Starting post search and like...")
-        results = linkedin.search_and_like_posts(query=search_query, like_count=like_count)
+        # Generate content
+        logger.info("Generating LinkedIn post content...")
+        content = await linkedin.generate_linkedin_content(test_url)
+        logger.info(f"Generated content: {content}")
         
-        # Log results
-        logger.info(f"Successfully liked {len(results)} posts")
-        for i, result in enumerate(results, 1):
-            logger.info(f"Like {i} result: {result}")
+        # Post to LinkedIn
+        logger.info("Posting to LinkedIn...")
+        success = linkedin.post_to_linkedin(content, test_url)
+        
+        if success:
+            logger.info("Successfully posted to LinkedIn")
+        else:
+            logger.error("Failed to post to LinkedIn")
         
     except Exception as e:
         logger.error(f"Test failed with error: {str(e)}")
