@@ -22,6 +22,7 @@ from mcp_server.tools.post_tweets import TwitterPlaywright
 from mcp_server.tools.bsky import BlueskyAPI
 from mcp_server.tools.schedule_post import SchedulePost
 from mcp_server.tools.telegram_post import TelegramPoster
+from mcp_server.tools.linkedin import LinkedInPoster
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -55,6 +56,7 @@ class WorkflowGraph:
         self.bsky = BlueskyAPI()
         self.scheduler = SchedulePost(self.sheets)
         self.telegram = TelegramPoster()
+        self.linkedin = LinkedInPoster()
 
     def now(self):
         return datetime.utcnow().isoformat()
@@ -479,6 +481,60 @@ class WorkflowGraph:
             
             return {**state, "error": error_msg}
 
+    async def post_to_linkedin_node(self, state):
+        """Post content to LinkedIn."""
+        if state.get('error'):
+            return state
+            
+        if not state.get('text'):
+            error_msg = "No content available to post to LinkedIn"
+            return {**state, "error": error_msg}
+            
+        current_row = state["current_row"]
+        if current_row.get('sheet') != 'Sheet1':
+            # Skip if not from Sheet1
+            return {**state, "skipped": True, "reason": "Not a LinkedIn URL"}
+            
+        text = state["text"]
+        url = current_row.get('url', '')
+        
+        try:
+            # Generate LinkedIn content
+            content = await self.linkedin.generate_linkedin_content(url)
+            
+            # Post to LinkedIn
+            if self.linkedin.post_to_linkedin(content, url):
+                # Update Sheet1
+                sheet = self.sheets.sheet.worksheet("Sheet1")
+                headers = sheet.row_values(1)
+                col_indices = {col: headers.index(col) + 1 for col in headers}
+                
+                sheet.update_cell(current_row['id'], col_indices['linkedin_result'], "success")
+                sheet.update_cell(current_row['id'], col_indices['retry_count_post_linkedin'], "0")
+                sheet.update_cell(current_row['id'], col_indices['last_update_ts'], self.now())
+                
+                return {**state, "posted_to_linkedin": True}
+            else:
+                raise Exception("Failed to post to LinkedIn")
+                
+        except Exception as e:
+            error_msg = f"Error posting to LinkedIn: {str(e)}"
+            sheet = self.sheets.sheet.worksheet("Sheet1")
+            headers = sheet.row_values(1)
+            col_indices = {col: headers.index(col) + 1 for col in headers}
+            
+            retry_count = current_row.get('retry_count_post_linkedin', '0')
+            try:
+                current_retry = int(retry_count) if retry_count else 0
+            except ValueError:
+                current_retry = 0
+                
+            sheet.update_cell(current_row['id'], col_indices['linkedin_result'], "error")
+            sheet.update_cell(current_row['id'], col_indices['retry_count_post_linkedin'], str(current_retry + 1))
+            sheet.update_cell(current_row['id'], col_indices['last_update_ts'], self.now())
+            
+            return {**state, "error": error_msg}
+
     def get_random_search_term(self):
         """Get a random search term from the configured list."""
         if not self.search_terms:
@@ -505,6 +561,12 @@ class WorkflowGraph:
                 logger.info(f"Engaging with Bluesky posts using term: {search_term}")
                 await self.bsky.search_and_like_blockchain(search_term=search_term, like_count=3)
                 logger.info("Bluesky engagement completed")
+                
+                # Like posts on LinkedIn with same search term
+                logger.info(f"Engaging with LinkedIn posts using term: {search_term}")
+                linkedin_like_count = int(os.getenv('LINKEDIN_LIKE_COUNT', '5'))
+                await self.linkedin.search_and_like_posts(search_term=search_term, like_count=linkedin_like_count)
+                logger.info("LinkedIn engagement completed")
                 
                 # Update the Google Sheet if we have a current row
                 if state.get('current_row'):
@@ -697,6 +759,7 @@ class WorkflowGraph:
         graph.add_node("store_tweets", RunnableLambda(self.store_tweets_node))
         graph.add_node("post_to_twitter", RunnableLambda(self.post_to_twitter_node))
         graph.add_node("post_to_bsky", RunnableLambda(self.post_to_bsky_node))
+        graph.add_node("post_to_linkedin", RunnableLambda(self.post_to_linkedin_node))
         graph.add_node("engage_posts", RunnableLambda(self.engage_posts_node))
         graph.add_node("schedule_followups", RunnableLambda(self.schedule_followups_node))
         graph.add_node("completion", RunnableLambda(self.completion_node))
@@ -708,7 +771,8 @@ class WorkflowGraph:
         graph.add_edge("generate_tweets", "store_tweets")
         graph.add_edge("store_tweets", "post_to_twitter")
         graph.add_edge("post_to_twitter", "post_to_bsky")
-        graph.add_edge("post_to_bsky", "engage_posts")
+        graph.add_edge("post_to_bsky", "post_to_linkedin")
+        graph.add_edge("post_to_linkedin", "engage_posts")
         graph.add_edge("engage_posts", "schedule_followups")
         graph.add_edge("schedule_followups", "completion")
         graph.add_edge("completion", END)
@@ -766,6 +830,13 @@ class WorkflowGraph:
         )
         graph.add_conditional_edges(
             "post_to_bsky",
+            {
+                "post_to_linkedin": lambda x: not has_error(x),
+                "completion": has_error
+            }
+        )
+        graph.add_conditional_edges(
+            "post_to_linkedin",
             {
                 "engage_posts": lambda x: not has_error(x),
                 "completion": has_error

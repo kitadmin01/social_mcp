@@ -1,0 +1,1 @@
+nohup python mcp_client/client.py > out.log 2>&1 &
