@@ -18,7 +18,7 @@ from common.llm_orchestrator import LLMOrchestrator
 from common.retry_utils import retry_with_backoff
 from mcp_server.tools.extract_content import ExtractContent
 from mcp_server.tools.store_tweets import StoreTweets
-from mcp_server.tools.post_tweets import TwitterPlaywright
+from mcp_server.tools.multi_twitter import MultiTwitterPlaywright
 from mcp_server.tools.bsky import BlueskyAPI
 from mcp_server.tools.schedule_post import SchedulePost
 from mcp_server.tools.telegram_post import TelegramPoster
@@ -35,10 +35,16 @@ class WorkflowGraph:
         self.M = batch_size
         self.ENGAGE_COUNT = engage_count
         
-        # Get search terms from environment
-        search_terms = os.getenv('SEARCH_TERMS', '#blockchain,#crypto,#web3,#defi,#nft')
-        self.search_terms = [term.strip() for term in search_terms.split(',')]
-        logger.info(f"Initialized with search terms: {self.search_terms}")
+        # Get search terms from environment for each account
+        search_terms_primary = os.getenv('SEARCH_TERMS_PRIMARY', '#blockchain,#crypto,#web3,#defi,#nft')
+        search_terms_secondary = os.getenv('SEARCH_TERMS_SECONDARY', '#cryptotrading,#bitcoin,#ethereum,#altcoin')
+        
+        self.search_terms_primary = [term.strip() for term in search_terms_primary.split(',')]
+        self.search_terms_secondary = [term.strip() for term in search_terms_secondary.split(',')]
+        
+        logger.info(f"Initialized with search terms:")
+        logger.info(f"  Primary: {self.search_terms_primary}")
+        logger.info(f"  Secondary: {self.search_terms_secondary}")
         
         # Get credentials path and sheet ID from environment
         credentials_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "google_sheets_credentials.json")
@@ -52,7 +58,7 @@ class WorkflowGraph:
         self.llm = LLMOrchestrator(provider="openai")
         self.extractor = ExtractContent()
         self.tweet_storer = StoreTweets(self.sheets)
-        self.twitter = TwitterPlaywright()
+        self.twitter = MultiTwitterPlaywright()
         self.bsky = BlueskyAPI()
         self.scheduler = SchedulePost(self.sheets)
         self.telegram = TelegramPoster()
@@ -405,17 +411,37 @@ class WorkflowGraph:
         tweets = state["tweets"]
         
         try:
-            # Post each tweet
+            # Post each tweet with both accounts
             for tweet in tweets:
-                await self.twitter.post_tweet(tweet['text'])
+                # Post with primary account
+                primary_success = await self.twitter.post_tweet(tweet['text'], 'primary')
+                if primary_success:
+                    logger.info(f"Tweet posted successfully with primary account")
+                else:
+                    logger.warning(f"Failed to post tweet with primary account")
+                
+                # Post with secondary account
+                secondary_success = await self.twitter.post_tweet(tweet['text'], 'secondary')
+                if secondary_success:
+                    logger.info(f"Tweet posted successfully with secondary account")
+                else:
+                    logger.warning(f"Failed to post tweet with secondary account")
+                
+                # Add delay between tweets to avoid rate limiting
+                await asyncio.sleep(2)
                 
             # Update Sheet1
             sheet = self.sheets.sheet.worksheet("Sheet1")
             headers = sheet.row_values(1)
             col_indices = {col: headers.index(col) + 1 for col in headers}
             
-            sheet.update_cell(current_row['id'], col_indices['twitter_result'], "success")
-            sheet.update_cell(current_row['id'], col_indices['retry_count_post_twitter'], "0")
+            # Mark as success if at least one account posted successfully
+            if primary_success or secondary_success:
+                sheet.update_cell(current_row['id'], col_indices['twitter_result'], "success")
+                sheet.update_cell(current_row['id'], col_indices['retry_count_post_twitter'], "0")
+            else:
+                sheet.update_cell(current_row['id'], col_indices['twitter_result'], "error")
+                sheet.update_cell(current_row['id'], col_indices['retry_count_post_twitter'], "1")
             
             return {**state, "posted": True}
         except Exception as e:
@@ -512,6 +538,7 @@ class WorkflowGraph:
                 sheet.update_cell(current_row['id'], col_indices['linkedin_result'], "success")
                 sheet.update_cell(current_row['id'], col_indices['retry_count_post_linkedin'], "0")
                 sheet.update_cell(current_row['id'], col_indices['last_update_ts'], self.now())
+                sheet.update_cell(current_row['id'], col_indices['status'], "complete")  # Update status to complete
                 
                 return {**state, "posted_to_linkedin": True}
             else:
@@ -535,66 +562,89 @@ class WorkflowGraph:
             
             return {**state, "error": error_msg}
 
-    def get_random_search_term(self):
-        """Get a random search term from the configured list."""
-        if not self.search_terms:
-            return "#blockchain"  # fallback to default
-        return random.choice(self.search_terms)
+    def get_random_search_term(self, account_name='primary'):
+        """Get a random search term from the configured list for the specified account."""
+        if account_name == 'primary':
+            if not self.search_terms_primary:
+                return "#blockchain"  # fallback to default
+            return random.choice(self.search_terms_primary)
+        elif account_name == 'secondary':
+            if not self.search_terms_secondary:
+                return "#cryptotrading"  # fallback to default
+            return random.choice(self.search_terms_secondary)
+        else:
+            # Default to primary if account name is not recognized
+            if not self.search_terms_primary:
+                return "#blockchain"
+            return random.choice(self.search_terms_primary)
 
     async def engage_posts_node(self, state):
         if state.get('error'):
             return state
             
-        # Allow engagement even if no tweets were posted
-        if state.get('engagement_only') or state.get('posted'):
-            try:
-                # Get random search term for this engagement cycle
-                search_term = self.get_random_search_term()
-                logger.info(f"Using search term for engagement: {search_term}")
-                
-                # Like tweets with random search term
-                logger.info(f"Engaging with Twitter posts using term: {search_term}")
-                await self.twitter.search_and_like_tweets(search_term=search_term, max_likes=5)
-                logger.info("Twitter engagement completed")
-                
-                # Like posts on Bluesky with same search term
-                logger.info(f"Engaging with Bluesky posts using term: {search_term}")
-                await self.bsky.search_and_like_blockchain(search_term=search_term, like_count=3)
-                logger.info("Bluesky engagement completed")
-                
-                # Like posts on LinkedIn with same search term
-                logger.info(f"Engaging with LinkedIn posts using term: {search_term}")
-                linkedin_like_count = int(os.getenv('LINKEDIN_LIKE_COUNT', '5'))
-                await self.linkedin.search_and_like_posts(search_term=search_term, like_count=linkedin_like_count)
-                logger.info("LinkedIn engagement completed")
-                
-                # Update the Google Sheet if we have a current row
-                if state.get('current_row'):
-                    self.sheets.update_row(state['current_row']['id'], {
-                        "engagement_ts": self.now(),
-                        "retry_count_engagement": "0",
-                        "status": "in_progress"
-                    })
-                
-                return {**state, "engaged": True}
-            except Exception as e:
-                error_msg = f"Error engaging with posts: {str(e)}"
-                logger.error(error_msg)
-                if state.get('current_row'):
-                    retry_count = state['current_row'].get('retry_count_engagement', '0')
-                    try:
-                        current_retry = int(retry_count) if retry_count else 0
-                    except ValueError:
-                        current_retry = 0
-                        
-                    self.sheets.update_row(state['current_row']['id'], {
-                        "status": "error",
-                        "retry_count_engagement": str(current_retry + 1),
-                        "engagement_ts": self.now()
-                    })
-                return {**state, "error": error_msg}
-        
-        return state
+        # Always run engagement if no errors (removed restrictive condition)
+        try:
+            logger.info(f"Engaging with Twitter posts using separate search terms for each account")
+            
+            # Engage with primary account using primary search terms
+            primary_search_term = self.get_random_search_term('primary')
+            logger.info(f"Primary account using search term: {primary_search_term}")
+            
+            primary_success = await self.twitter.search_and_like_tweets(
+                search_term=primary_search_term, 
+                max_likes=3, 
+                account_name='primary'
+            )
+            if primary_success:
+                logger.info("Primary Twitter account engagement completed")
+            else:
+                logger.warning("Primary Twitter account engagement failed")
+            
+            # Engage with secondary account using secondary search terms
+            secondary_search_term = self.get_random_search_term('secondary')
+            logger.info(f"Secondary account using search term: {secondary_search_term}")
+            
+            secondary_success = await self.twitter.search_and_like_tweets(
+                search_term=secondary_search_term, 
+                max_likes=3, 
+                account_name='secondary'
+            )
+            if secondary_success:
+                logger.info("Secondary Twitter account engagement completed")
+            else:
+                logger.warning("Secondary Twitter account engagement failed")
+            
+            # Like posts on Bluesky with same search term
+            # COMMENTED OUT: Bluesky like feature disabled
+            # logger.info(f"Engaging with Bluesky posts using term: {search_term}")
+            # await self.bsky.search_and_like_blockchain(search_term=search_term, like_count=3)
+            # logger.info("Bluesky engagement completed")
+            
+            # Update the Google Sheet if we have a current row
+            if state.get('current_row'):
+                self.sheets.update_row(state['current_row']['id'], {
+                    "engagement_ts": self.now(),
+                    "retry_count_engagement": "0",
+                    "status": "in_progress"
+                })
+            
+            return {**state, "engaged": True}
+        except Exception as e:
+            error_msg = f"Error engaging with posts: {str(e)}"
+            logger.error(error_msg)
+            if state.get('current_row'):
+                retry_count = state['current_row'].get('retry_count_engagement', '0')
+                try:
+                    current_retry = int(retry_count) if retry_count else 0
+                except ValueError:
+                    current_retry = 0
+                    
+                self.sheets.update_row(state['current_row']['id'], {
+                    "status": "error",
+                    "retry_count_engagement": str(current_retry + 1),
+                    "engagement_ts": self.now()
+                })
+            return {**state, "error": error_msg}
 
     async def schedule_followups_node(self, state):
         if "error" in state:
@@ -688,7 +738,9 @@ class WorkflowGraph:
             sheet2.update_cell(current_row['id'], col_indices['last_update_ts'], self.now())
             logger.info(f"Successfully posted to Telegram and updated status to complete for row {current_row['id']}")
             
-            return {**state, "posted_to_telegram": True}
+            # Return state with completion flag
+            return {**state, "posted_to_telegram": True, "end": True}
+            
         except Exception as e:
             error_msg = f"Error posting to Telegram: {str(e)}"
             logger.error(error_msg)
@@ -698,7 +750,7 @@ class WorkflowGraph:
             sheet2.update_cell(current_row['id'], col_indices['error'], error_msg)
             sheet2.update_cell(current_row['id'], col_indices['last_update_ts'], self.now())
             
-            return {**state, "error": error_msg}
+            return {**state, "error": error_msg, "end": True}
 
     async def completion_node(self, state: Dict) -> Dict:
         """Handle workflow completion."""
@@ -710,6 +762,12 @@ class WorkflowGraph:
                 
             row_id = current_row.get('id')
             sheet_name = current_row.get('sheet', 'Sheet1')
+            
+            # Skip if this is a Sheet2 row that was already marked as complete
+            if sheet_name == 'Sheet2' and state.get('posted_to_telegram'):
+                logger.info(f"Skipping completion node for Sheet2 row {row_id} as it was already marked complete")
+                return {"end": True}
+            
             status = "complete" if not state.get('error') else "error"
             
             # Update the row with completion status
@@ -731,9 +789,12 @@ class WorkflowGraph:
         Returns:
             Dict[str, Any]: Status information for each platform
         """
+        twitter_status = self.twitter.get_status() if hasattr(self.twitter, 'get_status') else None
+        
         return {
             'telegram': self.telegram.get_status() if hasattr(self.telegram, 'get_status') else None,
-            'twitter': self.twitter.get_status() if hasattr(self.twitter, 'get_status') else None,
+            'twitter_primary': twitter_status.get('primary', False) if twitter_status else None,
+            'twitter_secondary': twitter_status.get('secondary', False) if twitter_status else None,
             'bluesky': self.bsky.get_status() if hasattr(self.bsky, 'get_status') else None
         }
 
@@ -793,6 +854,9 @@ class WorkflowGraph:
         def has_error(state):
             return "error" in state
 
+        def is_complete(state):
+            return state.get('end', False)
+
         graph.add_conditional_edges(
             "extract_content",
             {
@@ -803,8 +867,8 @@ class WorkflowGraph:
         graph.add_conditional_edges(
             "post_to_telegram",
             {
-                "generate_tweets": lambda x: not has_error(x),
-                "completion": has_error
+                "generate_tweets": lambda x: not (has_error(x) or is_complete(x)),
+                "completion": lambda x: has_error(x) or is_complete(x)
             }
         )
         graph.add_conditional_edges(

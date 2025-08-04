@@ -3,6 +3,7 @@ import os
 import sys
 import logging
 import signal
+import random
 from datetime import datetime, timedelta
 from dotenv import load_dotenv, find_dotenv
 from mcp import ClientSession, StdioServerParameters
@@ -25,12 +26,17 @@ sys.path.append(project_root)
 
 # Global flag for graceful shutdown
 running = True
+# Global Twitter instance to keep sessions open
+global_twitter = None
 
 def signal_handler(signum, frame):
     """Handle shutdown signals."""
-    global running
+    global running, global_twitter
     logger.info("Received shutdown signal. Gracefully stopping...")
     running = False
+    # Close Twitter sessions on shutdown
+    if global_twitter:
+        asyncio.create_task(global_twitter.close_session())
 
 def load_config():
     """Load configuration from environment variables."""
@@ -67,6 +73,7 @@ def load_config():
 
 async def run_workflow():
     """Run the social media workflow."""
+    global global_twitter
     session = None
     try:
         # Initialize server parameters
@@ -95,13 +102,23 @@ async def run_workflow():
                 status = workflow.get_status()
                 logger.info("Platform Status:")
                 for platform, platform_status in status.items():
-                    logger.info(f"  {platform}: {'Ready' if platform_status else 'Not Available'}")
+                    if platform.startswith('twitter_'):
+                        account_name = platform.replace('twitter_', '')
+                        status_text = 'Ready' if platform_status else 'Not Available'
+                        logger.info(f"  Twitter ({account_name}): {status_text}")
+                    else:
+                        logger.info(f"  {platform}: {'Ready' if platform_status else 'Not Available'}")
                 
                 graph = workflow.build_workflow_graph()
                 
                 # Get workflow interval from environment
                 interval_minutes = int(os.getenv('WORKFLOW_INTERVAL_MINUTES', '60'))
                 logger.info(f"Workflow will run every {interval_minutes} minutes")
+                
+                # Initialize global Twitter instance once
+                from mcp_server.tools.multi_twitter import MultiTwitterPlaywright
+                global_twitter = MultiTwitterPlaywright()
+                logger.info("Initialized global Twitter instance with persistent sessions")
                 
                 while running:
                     try:
@@ -112,50 +129,87 @@ async def run_workflow():
                         # First try to process content
                         result = await graph.ainvoke({})
                         
-                        # If no content, run engagement tasks
-                        if result.get('error') and "No content available" in result['error']:
-                            logger.info("No content to process, running engagement tasks...")
+                        # Always run engagement tasks (not just when no content)
+                        logger.info("Running engagement tasks...")
+                        
+                        # Run Twitter engagement with both accounts using persistent sessions
+                        try:
+                            logger.info("Running Twitter engagement with both accounts using persistent sessions...")
                             
-                            # Run Twitter engagement
-                            try:
-                                logger.info("Running Twitter engagement...")
-                                twitter_tool = next((tool for tool in tools if tool.name == "engage_twitter"), None)
-                                if twitter_tool:
-                                    twitter_like_count = int(os.getenv('TWITTER_LIKE_COUNT', '10'))
-                                    await twitter_tool.ainvoke({"count": twitter_like_count})
-                                    logger.info(f"Twitter engagement completed with {twitter_like_count} likes")
-                                else:
-                                    logger.error("Twitter engagement tool not found")
-                            except Exception as e:
-                                logger.error(f"Error in Twitter engagement: {str(e)}")
+                            # Get search terms for each account
+                            search_terms_primary = os.getenv('SEARCH_TERMS_PRIMARY', '#blockchain,#crypto,#web3,#defi,#nft')
+                            search_terms_secondary = os.getenv('SEARCH_TERMS_SECONDARY', '#cryptotrading,#bitcoin,#ethereum,#altcoin')
                             
-                            # Run Bluesky engagement
-                            try:
-                                logger.info("Running Bluesky engagement...")
-                                bsky_tool = next((tool for tool in tools if tool.name == "engage_bsky"), None)
-                                if bsky_tool:
-                                    bsky_like_count = int(os.getenv('BLUESKY_LIKE_COUNT', '10'))
-                                    await bsky_tool.ainvoke({"count": bsky_like_count})
-                                    logger.info(f"Bluesky engagement completed with {bsky_like_count} likes")
-                                else:
-                                    logger.error("Bluesky engagement tool not found")
-                            except Exception as e:
-                                logger.error(f"Error in Bluesky engagement: {str(e)}")
+                            search_terms_primary_list = [term.strip() for term in search_terms_primary.split(',')]
+                            search_terms_secondary_list = [term.strip() for term in search_terms_secondary.split(',')]
                             
-                            # Run LinkedIn engagement
-                            try:
-                                logger.info("Running LinkedIn engagement...")
-                                linkedin_tool = next((tool for tool in tools if tool.name == "engage_linkedin"), None)
-                                if linkedin_tool:
-                                    linkedin_like_count = int(os.getenv('LINKEDIN_LIKE_COUNT', '5'))
-                                    await linkedin_tool.ainvoke({"count": linkedin_like_count})
-                                    logger.info(f"LinkedIn engagement completed with {linkedin_like_count} likes")
-                                else:
-                                    logger.error("LinkedIn engagement tool not found")
-                            except Exception as e:
-                                logger.error(f"Error in LinkedIn engagement: {str(e)}")
+                            # Select random search terms for each account
+                            primary_search_term = random.choice(search_terms_primary_list)
+                            secondary_search_term = random.choice(search_terms_secondary_list)
                             
-                            result = {"status": "engagement_completed"}
+                            twitter_like_count = int(os.getenv('TWITTER_LIKE_COUNT', '10'))
+                            likes_per_account = twitter_like_count // 2
+                            
+                            # Engage with primary account using primary search terms
+                            logger.info(f"Primary account using search term: {primary_search_term}")
+                            primary_success = await global_twitter.search_and_like_tweets(
+                                search_term=primary_search_term, 
+                                max_likes=likes_per_account, 
+                                account_name='primary'
+                            )
+                            
+                            # Engage with secondary account using secondary search terms
+                            logger.info(f"Secondary account using search term: {secondary_search_term}")
+                            secondary_success = await global_twitter.search_and_like_tweets(
+                                search_term=secondary_search_term, 
+                                max_likes=likes_per_account, 
+                                account_name='secondary'
+                            )
+                            
+                            if primary_success:
+                                logger.info(f"Primary Twitter account engagement completed with {likes_per_account} likes")
+                            else:
+                                logger.warning("Primary Twitter account engagement failed")
+                                
+                            if secondary_success:
+                                logger.info(f"Secondary Twitter account engagement completed with {likes_per_account} likes")
+                            else:
+                                logger.warning("Secondary Twitter account engagement failed")
+                            
+                            # Don't close sessions - keep them open for next cycle
+                            logger.info("Keeping Twitter browser sessions open for next cycle")
+                            
+                        except Exception as e:
+                            logger.error(f"Error in Twitter engagement: {str(e)}")
+                        
+                        # Run Bluesky engagement
+                        # COMMENTED OUT: Bluesky like feature disabled
+                        # try:
+                        #     logger.info("Running Bluesky engagement...")
+                        #     bsky_tool = next((tool for tool in tools if tool.name == "engage_bsky"), None)
+                        #     if bsky_tool:
+                        #         bsky_like_count = int(os.getenv('BLUESKY_LIKE_COUNT', '10'))
+                        #         await bsky_tool.ainvoke({"count": bsky_like_count})
+                        #         logger.info(f"Bluesky engagement completed with {bsky_like_count} likes")
+                        #     else:
+                        #         logger.error("Bluesky engagement tool not found")
+                        # except Exception as e:
+                        #     logger.error(f"Error in Bluesky engagement: {str(e)}")
+                        
+                        # Run LinkedIn engagement
+                        try:
+                            logger.info("Running LinkedIn engagement...")
+                            linkedin_tool = next((tool for tool in tools if tool.name == "engage_linkedin"), None)
+                            if linkedin_tool:
+                                linkedin_like_count = int(os.getenv('LINKEDIN_LIKE_COUNT', '5'))
+                                await linkedin_tool.ainvoke({"count": linkedin_like_count})
+                                logger.info(f"LinkedIn engagement completed with {linkedin_like_count} likes")
+                            else:
+                                logger.error("LinkedIn engagement tool not found")
+                        except Exception as e:
+                            logger.error(f"Error in LinkedIn engagement: {str(e)}")
+                        
+                        result = {"status": "engagement_completed"}
                         
                         end_time = datetime.now()
                         
@@ -196,6 +250,14 @@ async def run_workflow():
         logger.error(f"Error running workflow: {str(e)}", exc_info=True)
         raise
     finally:
+        # Close Twitter sessions on final cleanup
+        if global_twitter:
+            try:
+                await global_twitter.close_session()
+                logger.info("Closed Twitter sessions on final cleanup")
+            except Exception as e:
+                logger.error(f"Error closing Twitter sessions: {str(e)}")
+        
         if session:
             try:
                 # Don't try to close the session, just let it be cleaned up by the context manager

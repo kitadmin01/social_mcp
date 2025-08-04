@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from mcp_server.tools.extract_content import ExtractContent
 from mcp_server.tools.store_tweets import StoreTweets
-from mcp_server.tools.post_tweets import TwitterPlaywright
+from mcp_server.tools.multi_twitter import MultiTwitterPlaywright
 from mcp_server.tools.bsky import BlueskyAPI
 from mcp_server.tools.schedule_post import SchedulePost
 from common.google_sheets import GoogleSheetsClient
@@ -72,12 +72,12 @@ def initialize_tools():
         sheets = GoogleSheetsClient(credentials_path, GOOGLE_SHEET_ID)
         extractor = ExtractContent()
         tweet_storer = StoreTweets(sheets)
-        twitter = TwitterPlaywright()
+        twitter = MultiTwitterPlaywright()
         bsky = BlueskyAPI()
         scheduler = SchedulePost(sheets)
         llm = LLMOrchestrator(provider="openai")
         
-        logger.info("MCP server initialization completed successfully")
+        logger.info("MCP server initialization completed successfully with persistent Twitter sessions")
         
     except Exception as e:
         logger.error(f"Error during MCP server initialization: {str(e)}")
@@ -91,6 +91,7 @@ async def cleanup_resources():
         # Cleanup Twitter session
         if hasattr(twitter, 'close_session'):
             await twitter.close_session()
+            logger.info("Closed Twitter sessions on server cleanup")
             
         # Cleanup any other resources
         for session in active_sessions:
@@ -99,52 +100,106 @@ async def cleanup_resources():
             except Exception as e:
                 logger.error(f"Error closing session: {str(e)}")
                 
-        logger.info("MCP server cleanup completed successfully")
+        logger.info("MCP server cleanup completed")
         
     except Exception as e:
-        logger.error(f"Error during MCP server cleanup: {str(e)}")
+        logger.error(f"Error during cleanup: {str(e)}")
+
+# Initialize tools
+initialize_tools()
 
 @mcp.tool()
 async def extract_content(url: str) -> str:
     """Extract content from a URL."""
-    try:
-        logger.info(f"Extracting content from URL: {url}")
-        return await extractor.extract(url)
-    except Exception as e:
-        logger.error(f"Error extracting content: {str(e)}")
-        raise
+    return await extractor.extract(url)
 
 @mcp.tool()
 async def generate_tweets(text: str) -> list:
-    """Generate tweets from text content."""
-    try:
-        logger.info(f"Generating tweets for text: {text[:50]}...")
-        return await llm.generate_content(f"Generate 6 tweets for: {text}")
-    except Exception as e:
-        logger.error(f"Error generating tweets: {str(e)}")
-        raise
+    """Generate tweets from content."""
+    return await llm.generate_content(f"Generate 3 tweets from: {text}")
 
 @mcp.tool()
 async def store_tweets(row_id: int, tweets: list) -> str:
-    """Store generated tweets."""
-    try:
-        logger.info(f"Storing tweets for row {row_id}")
-        await tweet_storer.store_llm_tweets(row_id, tweets)
-        return "stored"
-    except Exception as e:
-        logger.error(f"Error storing tweets: {str(e)}")
-        raise
+    """Store tweets in Google Sheets."""
+    return await tweet_storer.store_tweets(row_id, tweets)
 
 @mcp.tool()
 async def post_tweet(tweet: str) -> str:
-    """Post a tweet to Twitter."""
+    """Post a tweet using both Twitter accounts."""
     try:
-        logger.info(f"Posting tweet: {tweet[:50]}...")
-        await twitter.post_tweet(tweet)
-        return "tweeted"
+        # Post with primary account
+        primary_success = await twitter.post_tweet(tweet, 'primary')
+        if primary_success:
+            logger.info("Tweet posted successfully with primary account")
+        else:
+            logger.warning("Failed to post tweet with primary account")
+        
+        # Post with secondary account
+        secondary_success = await twitter.post_tweet(tweet, 'secondary')
+        if secondary_success:
+            logger.info("Tweet posted successfully with secondary account")
+        else:
+            logger.warning("Failed to post tweet with secondary account")
+        
+        if primary_success and secondary_success:
+            return f"Tweet posted successfully with both accounts: {tweet[:50]}..."
+        elif primary_success:
+            return f"Tweet posted with primary account only: {tweet[:50]}..."
+        elif secondary_success:
+            return f"Tweet posted with secondary account only: {tweet[:50]}..."
+        else:
+            return "Failed to post tweet with both accounts"
+            
     except Exception as e:
         logger.error(f"Error posting tweet: {str(e)}")
-        raise
+        return f"Error: {str(e)}"
+
+@mcp.tool()
+async def engage_twitter(max_likes: int = 10) -> str:
+    """Engage with Twitter posts by liking them."""
+    try:
+        # Get search terms for each account
+        search_terms_primary = os.getenv('SEARCH_TERMS_PRIMARY', '#blockchain,#crypto,#web3,#defi,#nft')
+        search_terms_secondary = os.getenv('SEARCH_TERMS_SECONDARY', '#cryptotrading,#bitcoin,#ethereum,#altcoin')
+        
+        search_terms_primary_list = [term.strip() for term in search_terms_primary.split(',')]
+        search_terms_secondary_list = [term.strip() for term in search_terms_secondary.split(',')]
+        
+        # Select random search terms for each account
+        primary_search_term = random.choice(search_terms_primary_list)
+        secondary_search_term = random.choice(search_terms_secondary_list)
+        
+        # Split likes between accounts
+        likes_per_account = max_likes // 2
+        
+        # Engage with primary account using primary search terms
+        logger.info(f"Primary account using search term: {primary_search_term}")
+        primary_success = await twitter.search_and_like_tweets(
+            search_term=primary_search_term, 
+            max_likes=likes_per_account, 
+            account_name='primary'
+        )
+        
+        # Engage with secondary account using secondary search terms
+        logger.info(f"Secondary account using search term: {secondary_search_term}")
+        secondary_success = await twitter.search_and_like_tweets(
+            search_term=secondary_search_term, 
+            max_likes=likes_per_account, 
+            account_name='secondary'
+        )
+        
+        if primary_success and secondary_success:
+            return f"Successfully engaged with {max_likes} tweets using both accounts"
+        elif primary_success:
+            return f"Primary account engaged with {likes_per_account} tweets, secondary failed"
+        elif secondary_success:
+            return f"Secondary account engaged with {likes_per_account} tweets, primary failed"
+        else:
+            return "Failed to engage with tweets using both accounts"
+            
+    except Exception as e:
+        logger.error(f"Error engaging with Twitter: {str(e)}")
+        return f"Error: {str(e)}"
 
 @mcp.tool()
 async def post_bsky(text: str) -> str:
@@ -155,18 +210,6 @@ async def post_bsky(text: str) -> str:
         return "posted to bsky"
     except Exception as e:
         logger.error(f"Error posting to Bluesky: {str(e)}")
-        raise
-
-@mcp.tool()
-async def engage_twitter(count: int = 5) -> str:
-    """Engage with tweets on Twitter."""
-    try:
-        search_term = get_next_search_term()
-        logger.info(f"Engaging with {count} tweets on Twitter using term: {search_term}")
-        await twitter.search_and_like_tweets(search_term=search_term, max_likes=count)
-        return f"Engaged with {count} tweets on Twitter using term: {search_term}"
-    except Exception as e:
-        logger.error(f"Error engaging with Twitter: {str(e)}")
         raise
 
 @mcp.tool()
