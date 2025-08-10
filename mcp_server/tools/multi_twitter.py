@@ -472,66 +472,235 @@ class MultiTwitterPlaywright:
                 # Try multiple search approaches
                 search_success = False
                 
-                # Approach 1: Direct search URL
+                # Approach 1: Use search box from home page (more reliable)
                 try:
-                    logger.info(f"Trying direct search URL for {account_name}...")
-                    search_url = f'https://x.com/search?q={search_term}&src=typed_query&f=live'
-                    logger.info(f"Navigating to search URL for {account_name}: {search_url}")
+                    logger.info(f"Trying home page + search box approach for {account_name}...")
                     
-                    # Set shorter timeout for navigation
-                    await page.goto(search_url, wait_until='domcontentloaded', timeout=30000)
+                    # Navigate to home page
+                    await page.goto('https://x.com/home', wait_until='domcontentloaded', timeout=30000)
                     await page.wait_for_timeout(3000)
                     
-                    # Check if we're on a search page
-                    current_url = page.url
-                    if 'search' in current_url.lower():
-                        logger.info(f"Successfully navigated to search page for {account_name}")
-                        search_success = True
-                    else:
-                        logger.warning(f"Navigation didn't reach search page for {account_name}, current URL: {current_url}")
-                        
-                except Exception as e:
-                    logger.warning(f"Direct search URL approach failed for {account_name}: {str(e)}")
-                
-                # Approach 2: If direct URL failed, try home page + search box
-                if not search_success:
-                    try:
-                        logger.info(f"Trying home page + search box approach for {account_name}...")
-                        
-                        # Navigate to home page
-                        await page.goto('https://x.com/home', wait_until='domcontentloaded', timeout=30000)
+                    # Try to find and use search box
+                    search_selectors = [
+                        '[data-testid="SearchBox_Search_Input"]',
+                        'input[placeholder*="Search"]',
+                        'input[aria-label*="Search"]',
+                        '[data-testid="searchbox"]'
+                    ]
+                    
+                    search_box = None
+                    for selector in search_selectors:
+                        try:
+                            search_box = await page.wait_for_selector(selector, timeout=5000)
+                            if search_box:
+                                logger.info(f"Found search box with selector '{selector}' for {account_name}")
+                                break
+                        except:
+                            continue
+                    
+                    if search_box:
+                        await search_box.click()
+                        await page.wait_for_timeout(1000)
+                        await search_box.fill(search_term)
+                        await page.wait_for_timeout(1000)
+                        await page.keyboard.press('Enter')
                         await page.wait_for_timeout(3000)
                         
-                        # Try to find and use search box
-                        search_selectors = [
-                            '[data-testid="SearchBox_Search_Input"]',
-                            'input[placeholder*="Search"]',
-                            'input[aria-label*="Search"]',
-                            '[data-testid="searchbox"]'
-                        ]
+                        # Wait for search results to load
+                        await page.wait_for_timeout(2000)
                         
-                        search_box = None
-                        for selector in search_selectors:
-                            try:
-                                search_box = await page.wait_for_selector(selector, timeout=5000)
-                                if search_box:
-                                    logger.info(f"Found search box with selector '{selector}' for {account_name}")
-                                    break
-                            except:
-                                continue
+                        # Check if we're on a search results page
+                        current_url = page.url
+                        logger.info(f"After search, current URL: {current_url}")
                         
-                        if search_box:
-                            await search_box.click()
-                            await page.wait_for_timeout(1000)
-                            await search_box.fill(search_term)
-                            await page.wait_for_timeout(1000)
-                            await page.keyboard.press('Enter')
+                        # Try to select "Latest" filter after search
+                        try:
+                            logger.info(f"Attempting to select 'Latest' filter after search for {account_name}...")
+                            
+                            # Wait for the filter buttons to appear
                             await page.wait_for_timeout(3000)
-                            search_success = True
-                            logger.info(f"Search initiated via search box for {account_name}")
+                            
+                            # Try multiple selectors for the Latest filter
+                            latest_selectors = [
+                                '[data-testid="Latest"]',
+                                '[data-testid="tab"]:has-text("Latest")',
+                                'div[role="tab"]:has-text("Latest")',
+                                'div[aria-label*="Latest"]',
+                                'div[data-testid="tab"]:has-text("Latest")',
+                                'div[role="tab"][aria-selected="false"]:has-text("Latest")',
+                                'a[href*="f=live"]',
+                                'div[role="tab"]:has-text("Latest")',
+                                'div[aria-label="Latest"]',
+                                'div[data-testid="Latest"]'
+                            ]
+                            
+                            latest_selected = False
+                            for selector in latest_selectors:
+                                try:
+                                    latest_button = await page.wait_for_selector(selector, timeout=3000)
+                                    if latest_button:
+                                        await latest_button.click()
+                                        logger.info(f"Successfully clicked 'Latest' filter with selector '{selector}' for {account_name}")
+                                        latest_selected = True
+                                        await page.wait_for_timeout(2000)  # Wait for filter to apply
+                                        break
+                                except Exception as e:
+                                    logger.warning(f"Selector '{selector}' failed for Latest filter on {account_name}: {str(e)}")
+                                    continue
+                            
+                            # If selectors didn't work, try JavaScript approach
+                            if not latest_selected:
+                                try:
+                                    logger.info(f"Trying JavaScript approach to select 'Latest' filter for {account_name}...")
+                                    
+                                    # Try to find and click Latest using JavaScript
+                                    latest_clicked = await page.evaluate('''() => {
+                                        const tabs = Array.from(document.querySelectorAll('div[role="tab"], a[href*="f=live"], [data-testid="tab"]'));
+                                        const latestTab = tabs.find(tab => 
+                                            tab.textContent && tab.textContent.toLowerCase().includes('latest') ||
+                                            tab.getAttribute('aria-label') && tab.getAttribute('aria-label').toLowerCase().includes('latest')
+                                        );
+                                        if (latestTab) {
+                                            latestTab.click();
+                                            return true;
+                                        }
+                                        return false;
+                                    }''')
+                                    
+                                    if latest_clicked:
+                                        logger.info(f"Successfully clicked 'Latest' filter using JavaScript for {account_name}")
+                                        latest_selected = True
+                                        await page.wait_for_timeout(2000)
+                                    
+                                except Exception as e:
+                                    logger.warning(f"JavaScript approach failed for Latest filter on {account_name}: {str(e)}")
+                            
+                            # If still not selected, try direct URL with Latest filter
+                            if not latest_selected:
+                                try:
+                                    logger.info(f"Trying direct URL with Latest filter for {account_name}...")
+                                    latest_url = f'https://x.com/search?q={search_term}&src=typed_query&f=live'
+                                    await page.goto(latest_url, wait_until='domcontentloaded', timeout=30000)
+                                    await page.wait_for_timeout(3000)
+                                    logger.info(f"Navigated to Latest filter URL for {account_name}")
+                                    latest_selected = True
+                                except Exception as e:
+                                    logger.warning(f"Direct Latest URL failed for {account_name}: {str(e)}")
+                            
+                            if not latest_selected:
+                                logger.warning(f"Could not find 'Latest' filter button for {account_name}, continuing with default")
+                            
+                        except Exception as e:
+                            logger.warning(f"Error selecting 'Latest' filter for {account_name}: {str(e)}")
                         
+                        search_success = True
+                        logger.info(f"Search initiated via search box for {account_name}")
+                    
+                except Exception as e:
+                    logger.warning(f"Home page + search box approach failed for {account_name}: {str(e)}")
+                
+                # Approach 2: If search box failed, try direct URL navigation
+                if not search_success:
+                    try:
+                        logger.info(f"Trying direct search URL for {account_name}...")
+                        search_url = f'https://x.com/search?q={search_term}&src=typed_query&f=live'
+                        logger.info(f"Navigating to search URL for {account_name}: {search_url}")
+                        
+                        # Set shorter timeout for navigation
+                        await page.goto(search_url, wait_until='domcontentloaded', timeout=30000)
+                        await page.wait_for_timeout(3000)
+                        
+                        # Check if we're on a search page
+                        current_url = page.url
+                        if 'search' in current_url.lower():
+                            logger.info(f"Successfully navigated to search page for {account_name}")
+                            
+                            # Try to select "Latest" filter instead of "Top"
+                            try:
+                                logger.info(f"Attempting to select 'Latest' filter for {account_name}...")
+                                
+                                # Wait for the filter buttons to appear
+                                await page.wait_for_timeout(3000)
+                                
+                                # Try multiple selectors for the Latest filter
+                                latest_selectors = [
+                                    '[data-testid="Latest"]',
+                                    '[data-testid="tab"]:has-text("Latest")',
+                                    'div[role="tab"]:has-text("Latest")',
+                                    'div[aria-label*="Latest"]',
+                                    'div[data-testid="tab"]:has-text("Latest")',
+                                    'div[role="tab"][aria-selected="false"]:has-text("Latest")',
+                                    'a[href*="f=live"]',
+                                    'div[role="tab"]:has-text("Latest")',
+                                    'div[aria-label="Latest"]',
+                                    'div[data-testid="Latest"]'
+                                ]
+                                
+                                latest_selected = False
+                                for selector in latest_selectors:
+                                    try:
+                                        latest_button = await page.wait_for_selector(selector, timeout=3000)
+                                        if latest_button:
+                                            await latest_button.click()
+                                            logger.info(f"Successfully clicked 'Latest' filter with selector '{selector}' for {account_name}")
+                                            latest_selected = True
+                                            await page.wait_for_timeout(2000)  # Wait for filter to apply
+                                            break
+                                    except Exception as e:
+                                        logger.warning(f"Selector '{selector}' failed for Latest filter on {account_name}: {str(e)}")
+                                        continue
+                                
+                                # If selectors didn't work, try JavaScript approach
+                                if not latest_selected:
+                                    try:
+                                        logger.info(f"Trying JavaScript approach to select 'Latest' filter for {account_name}...")
+                                        
+                                        # Try to find and click Latest using JavaScript
+                                        latest_clicked = await page.evaluate('''() => {
+                                            const tabs = Array.from(document.querySelectorAll('div[role="tab"], a[href*="f=live"], [data-testid="tab"]'));
+                                            const latestTab = tabs.find(tab => 
+                                                tab.textContent && tab.textContent.toLowerCase().includes('latest') ||
+                                                tab.getAttribute('aria-label') && tab.getAttribute('aria-label').toLowerCase().includes('latest')
+                                            );
+                                            if (latestTab) {
+                                                latestTab.click();
+                                                return true;
+                                            }
+                                            return false;
+                                        }''')
+                                        
+                                        if latest_clicked:
+                                            logger.info(f"Successfully clicked 'Latest' filter using JavaScript for {account_name}")
+                                            latest_selected = True
+                                            await page.wait_for_timeout(2000)
+                                        
+                                    except Exception as e:
+                                        logger.warning(f"JavaScript approach failed for Latest filter on {account_name}: {str(e)}")
+                                
+                                # If still not selected, try direct URL with Latest filter
+                                if not latest_selected:
+                                    try:
+                                        logger.info(f"Trying direct URL with Latest filter for {account_name}...")
+                                        latest_url = f'https://x.com/search?q={search_term}&src=typed_query&f=live'
+                                        await page.goto(latest_url, wait_until='domcontentloaded', timeout=30000)
+                                        await page.wait_for_timeout(3000)
+                                        logger.info(f"Navigated to Latest filter URL for {account_name}")
+                                        latest_selected = True
+                                    except Exception as e:
+                                        logger.warning(f"Direct Latest URL failed for {account_name}: {str(e)}")
+                                
+                                if not latest_selected:
+                                    logger.warning(f"Could not find 'Latest' filter button for {account_name}, continuing with default")
+                                
+                            except Exception as e:
+                                logger.warning(f"Error selecting 'Latest' filter for {account_name}: {str(e)}")
+                            
+                            search_success = True
+                        else:
+                            logger.warning(f"Navigation didn't reach search page for {account_name}, current URL: {current_url}")
+                            
                     except Exception as e:
-                        logger.warning(f"Home page + search box approach failed for {account_name}: {str(e)}")
+                        logger.warning(f"Direct search URL approach failed for {account_name}: {str(e)}")
                 
                 if not search_success:
                     logger.error(f"All search approaches failed for {account_name}")
